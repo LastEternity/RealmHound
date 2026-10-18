@@ -4,7 +4,7 @@
 
 - `damage-sources-status.md` — source of truth; GitHub also renders it as Markdown.
 - `damage-sources-status.html` — self-contained interactive view served by GitHub Pages:
-  <https://pillarzz.github.io/RealmHound/research/damage-sources-status.html>
+  <https://lasteternity.github.io/RealmHound/research/damage-sources-status.html>
 
 ### Regenerating the HTML
 

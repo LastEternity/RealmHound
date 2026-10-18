@@ -50,7 +50,7 @@ move, replace, or reuse a published version tag.
 The release workflow:
 
 - Downloads and verifies the pinned official sound bundle from the private
-  `pillarzz/realmhound-build-assets` repository
+  `LastEternity/realmhound-build-assets` repository
 - Builds a universal macOS binary, and blocks the release if that build fails: a
   manifest must never advertise a macOS build that does not exist
 - Wraps that binary in `RealmHound.app` and publishes it as
@@ -66,7 +66,7 @@ The release workflow:
 `DISCORD_WEBHOOK` is required for public release announcements. `GIST_PAT` is
 required only for stable public releases, which update the production updater
 manifest. `BUILD_ASSETS_TOKEN` must be a fine-grained, read-only token with
-access to `pillarzz/realmhound-build-assets`. The workflow's built-in
+access to `LastEternity/realmhound-build-assets`. The workflow's built-in
 `GITHUB_TOKEN` publishes the GitHub Release.
 
 To replace official sounds, publish a new immutable release in the private

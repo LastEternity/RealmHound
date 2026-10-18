@@ -1,46 +1,5 @@
-# Platform
-* Added macOS support.
-
-# Combat History
-* New My Performance tab breaks down everything that contributed to your damage, with your stats and gear saved at the time of the fight.
-* Fixed bosses sometimes shown as escaped even though their loot confirmed the kill.
-* Fixed a stale local nexus marker on a fight completed by loot.
-* The escape and nexus marker now applies only to the section it belongs to.
-* Fixed dead allies being recorded as Escaped instead of Dead.
-* Dead characters now show their last seen skin and dyes in Combat History and Loot History.
-
-# Damage Tracking
-* Fixed items scaled by Vitality or Speed not counting toward your damage.
-* Fixed ability damage sometimes being credited to the wrong ability after using another one.
-* Fixed your own damage not including damage multipliers.
-* Fixed longbows disabling damage tracking for the rest of the map.
-* Fixed theoretical DPS calc crediting Savage with damage.
-
-# Character and Stats
-* Fixed Season 31 Crucible bonuses not applying on the Character Stats page.
-* Fixed stale Crucible markers from the previous season on characters.
-* Added Blood Ritual to the Character Stats page and to your own damage in Combat History.
-* Redesigned character cards to show Blood Ritual and Crucible tags and bonuses alongside stats.
-* Fixed the Legacy dungeon completion counter mapping on the Character Stats page.
-
-# Loot and History
-* Fixed loot boost timer display in character cards.
-* Fixed reskinned Janus bags not linking to the fight where that Janus was killed.
-* Reskinned Stone Guardians and Janus are now correctly labeled as Oryx's Castle and grouped into one card.
-* Unified reskinned Realm encounters with their original variants in search and filters, so both names find them and the sprite matches the current live variant.
-* Reskinned Oryx the Mad God 1 and 2 now map to Oryx's Chamber and Wine Cellar.
-
-# Live Feed
-* Added proximity-based Mysterious Crystal and Spectral Jailer entries to the Live Feed, with optional event sounds.
-
-# Missions
-* Repeatable missions that come off cooldown return to In Progress, and missions behind them stay unlocked.
-
-# Sounds and Debug
-* Raised the custom sound file limit to 15 MiB and added a warning when a file is too large.
-* Added Shiny white bag, Shiny teal bag, and Shiny pet skins toggles under Settings->Sound->Loot bags, off by default.
-* Added a Debug tab with a .rhcap recording toggle for testing purposes.
-* Added app resolution settings for reproducing layout issues.
-
-# Fixes
-* Security enhancements related to API requests.
+# PPE Discord Bot Integration (v0.0.1)
+* Added RotMG PPE Discord Bot HTTP bridge integration (`source: "tomato"` payload compatibility).
+* Added pull-up `🤖 PPE Bot` modal in the top bar with Bridge Review, Bridge Log, and Bot Configuration views.
+* Added automatic ETag-cached CSV sync on app startup from `tseringgg/rotmgppebot` with built-in fallback and manual refresh button (downloading a local CSV is now optional).
+* Updated repository and self-updater targets to `LastEternity/RealmHound`.

@@ -9334,6 +9334,14 @@ impl RealmHoundApp {
                     self.modals.show_settings = true;
                 }
 
+                crate::ppe_bridge_ui::render_top_bar_button(
+                    ui,
+                    &shadcn,
+                    icon_only,
+                    text_only,
+                    tab_tooltips,
+                );
+
                 // Update notification indicator
                 self.update_panel.render_indicator(ui, &self.update_checker, &shadcn);
 
@@ -9897,7 +9905,9 @@ impl eframe::App for RealmHoundApp {
         self.expire_due_season_resets();
 
         // Check if any modal is open
-        let modal_open = self.modals.any_blocking_open() || self.update_panel.is_details_open();
+        let modal_open = self.modals.any_blocking_open()
+            || self.update_panel.is_details_open()
+            || crate::ppe_bridge_ui::is_open();
 
         // Bottom status bar
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
@@ -9926,6 +9936,9 @@ impl eframe::App for RealmHoundApp {
         if self.modals.show_settings {
             self.render_settings_modal(ctx);
         }
+
+        // PPE Bot Bridge modal
+        crate::ppe_bridge_ui::render_modal(ctx, &self.shadcn);
 
         // Update details window (modal)
         self.update_panel.render_details_window(

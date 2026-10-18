@@ -35,6 +35,7 @@ mod event_log;
 mod memo;
 mod modals;
 mod panels;
+mod ppe_bridge_ui;
 mod processing;
 mod profiling;
 mod realm_event_sound;

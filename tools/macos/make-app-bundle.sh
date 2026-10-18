@@ -58,7 +58,7 @@ cat >"$app/Contents/Info.plist" <<PLIST
     <key>CFBundleIconFile</key>
     <string>RealmHound</string>
     <key>CFBundleIdentifier</key>
-    <string>io.github.pillarzz.realmhound</string>
+    <string>io.github.lasteternity.realmhound</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>

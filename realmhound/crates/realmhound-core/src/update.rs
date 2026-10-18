@@ -11,9 +11,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-/// URL to the version manifest gist
+/// URL to the version manifest published with the latest GitHub release
 const VERSION_MANIFEST_URL: &str =
-    "https://gist.githubusercontent.com/pillarzz/4f50870a65c14d179eb2c361b5915946/raw/version.json";
+    "https://github.com/LastEternity/RealmHound/releases/latest/download/version.json";
+
+/// Fallback GitHub Releases API URL for LastEternity/RealmHound
+const GITHUB_RELEASES_API_URL: &str =
+    "https://api.github.com/repos/LastEternity/RealmHound/releases";
 
 /// Timeout for HTTP requests
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -321,11 +325,26 @@ impl Default for UpdateChecker {
 fn fetch_manifest_blocking() -> Result<VersionManifest, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(REQUEST_TIMEOUT)
+        .user_agent("RealmHound")
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
+    if let Ok(response) = client.get(VERSION_MANIFEST_URL).send() {
+        if response.status().is_success() {
+            let manifest: VersionManifest = response
+                .json()
+                .map_err(|e| format!("Failed to parse version manifest: {}", e))?;
+            debug!(
+                "Fetched version manifest: latest = {}",
+                manifest.latest_version
+            );
+            return Ok(manifest);
+        }
+    }
+
+    // Fallback to GitHub Releases API for LastEternity/RealmHound
     let response = client
-        .get(VERSION_MANIFEST_URL)
+        .get(GITHUB_RELEASES_API_URL)
         .send()
         .map_err(|e| format!("Failed to fetch version manifest: {}", e))?;
 
@@ -336,15 +355,72 @@ fn fetch_manifest_blocking() -> Result<VersionManifest, String> {
         ));
     }
 
-    let manifest: VersionManifest = response
+    let gh_releases: Vec<serde_json::Value> = response
         .json()
-        .map_err(|e| format!("Failed to parse version manifest: {}", e))?;
+        .map_err(|e| format!("Failed to parse GitHub releases: {}", e))?;
 
-    debug!(
-        "Fetched version manifest: latest = {}",
-        manifest.latest_version
-    );
-    Ok(manifest)
+    let mut releases = Vec::new();
+    let mut latest_version = env!("CARGO_PKG_VERSION").to_string();
+    let mut download_url = String::new();
+    let mut macos_download_url = None;
+
+    for (idx, rel) in gh_releases.iter().enumerate() {
+        if rel.get("draft").and_then(|v| v.as_bool()).unwrap_or(false)
+            || rel
+                .get("prerelease")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        {
+            continue;
+        }
+        let tag = rel
+            .get("tag_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim_start_matches('v')
+            .to_string();
+        if tag.is_empty() {
+            continue;
+        }
+        if idx == 0 || download_url.is_empty() {
+            latest_version = tag.clone();
+            download_url = format!(
+                "https://github.com/LastEternity/RealmHound/releases/download/v{}/RealmHound.exe",
+                tag
+            );
+            macos_download_url = Some(format!(
+                "https://github.com/LastEternity/RealmHound/releases/download/v{}/RealmHound-macos-app.zip",
+                tag
+            ));
+        }
+        let date = rel
+            .get("published_at")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.split('T').next())
+            .unwrap_or("")
+            .to_string();
+        let body = rel.get("body").and_then(|v| v.as_str()).unwrap_or("");
+        let changes: Vec<String> = body
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| l.trim_start_matches(['-', '*', ' ']).to_string())
+            .collect();
+        releases.push(Release {
+            version: tag,
+            date,
+            changes,
+        });
+    }
+
+    Ok(VersionManifest {
+        latest_version,
+        download_url,
+        sha256: None,
+        macos_download_url,
+        macos_sha256: None,
+        releases,
+    })
 }
 
 /// Compare two version strings using semver

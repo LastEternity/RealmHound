@@ -560,6 +560,12 @@ impl LootTracker {
         // Process each bag that should be tracked
         let mut new_drops = Vec::new();
         for bag in pending_bags {
+            crate::ppe_bridge::on_pending_bag(
+                &bag,
+                &self.player_state,
+                self.detector.map_name(),
+                time_ms,
+            );
             // Filter: only track bags that should be tracked based on settings
             // (high-tier bags always, shiny always, low-tier based on settings)
             if !bag.should_be_tracked_with_settings(&self.tracking_settings) {

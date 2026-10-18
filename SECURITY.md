@@ -10,7 +10,7 @@ Prereleases are provided for testing and are not supported.
 Do not open a public issue for a suspected vulnerability.
 
 Use GitHub's
-[private vulnerability reporting](https://github.com/pillarzz/RealmHound/security/advisories/new)
+[private vulnerability reporting](https://github.com/LastEternity/RealmHound/security/advisories/new)
 to describe the issue, affected versions, impact, and reproduction steps.
 
 Do not attach unsanitized packet captures, logs, tokens, account exports, or

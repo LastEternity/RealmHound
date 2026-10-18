@@ -47,6 +47,7 @@ pub mod dust;
 pub mod keyper;
 pub mod loot;
 pub mod party_cache;
+pub mod ppe_bridge;
 pub mod profiling;
 pub mod protocol;
 pub mod realmshark_import;
