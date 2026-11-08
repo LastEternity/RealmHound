@@ -9,11 +9,15 @@ use std::path::{Path, PathBuf};
 
 use super::bag_types::LootBagType;
 use super::player_state::PlayerSnapshot;
+#[cfg(test)]
 use super::tracker::LootTracker;
 use crate::assets::get_asset_manager;
 
+#[path = "maintenance.rs"]
+mod maintenance;
+
 /// Database schema version for migrations.
-const SCHEMA_VERSION: i32 = 24;
+const SCHEMA_VERSION: i32 = 25;
 
 /// Highest loot-history schema version this build can validate and open. Used by
 /// flat-layout migration to reject databases written by a newer build.
@@ -128,6 +132,10 @@ pub struct SourceFilters {
     /// Free-text query matched against mob name, dungeon, or item name
     /// (case-insensitive LIKE). None/empty = no text filter.
     pub search_text: Option<String>,
+    /// Asset-derived UT/ST/Shiny union. None = unrestricted; Some(empty) = no matches.
+    pub property_item_ids: Option<Vec<i32>>,
+    /// Selected enchant-count tiers (0..=4, with 4 meaning 4+). None = unrestricted.
+    pub property_rarities: Option<Vec<i32>>,
 }
 
 impl SourceFilters {
@@ -144,11 +152,15 @@ impl SourceFilters {
                 .unwrap_or(true)
     }
 
-    /// Clear all source filters (preserves bag_types).
+    /// Clear source filters, preserving the bag and property toggles.
     pub fn clear(&mut self) {
         let bag_types = self.bag_types.take();
+        let property_item_ids = self.property_item_ids.take();
+        let property_rarities = self.property_rarities.take();
         *self = Self::default();
         self.bag_types = bag_types;
+        self.property_item_ids = property_item_ids;
+        self.property_rarities = property_rarities;
     }
 
     /// Set bag type filter.
@@ -254,6 +266,14 @@ impl LootDatabase {
     /// history database used by the v13 Unknown-source backfill; it is stored
     /// before migration runs.
     pub fn open_writer(loot_path: &Path, combat_path: Option<&Path>) -> SqlResult<Self> {
+        Self::open_writer_at_combat_cutoff(loot_path, combat_path, None)
+    }
+
+    pub(crate) fn open_writer_at_combat_cutoff(
+        loot_path: &Path,
+        combat_path: Option<&Path>,
+        combat_cutoff: Option<i64>,
+    ) -> SqlResult<Self> {
         if let Some(parent) = loot_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -263,7 +283,14 @@ impl LootDatabase {
             conn,
             combat_path: combat_path.map(Path::to_path_buf),
         };
-        db.initialize()?;
+        db.initialize(combat_cutoff)?;
+        if let Some(cutoff) = combat_cutoff {
+            db.conn.execute(
+                "UPDATE legacy_loot_repairs SET combat_cutoff=?1
+                 WHERE combat_cutoff IS NULL AND complete=0",
+                [cutoff],
+            )?;
+        }
         Ok(db)
     }
 
@@ -306,7 +333,7 @@ impl LootDatabase {
             conn,
             combat_path: None,
         };
-        db.initialize()?;
+        db.initialize(None)?;
         Ok(db)
     }
 
@@ -321,20 +348,21 @@ impl LootDatabase {
     }
 
     /// Initialize the database schema.
-    fn initialize(&mut self) -> SqlResult<()> {
+    fn initialize(&mut self, combat_cutoff: Option<i64>) -> SqlResult<()> {
         // Check schema version
         let version = self.get_schema_version();
 
         if version == 0 {
             // Fresh database - create tables
             self.create_tables()?;
+            self.create_repair_tables()?;
             self.set_schema_version(SCHEMA_VERSION)?;
         } else if version < SCHEMA_VERSION {
             // Need migration (future use)
-            self.migrate(version)?;
+            self.migrate(version, combat_cutoff)?;
         }
 
-        Ok(())
+        self.ensure_final_combat_correlation()
     }
 
     /// Get current schema version.
@@ -397,8 +425,28 @@ impl LootDatabase {
         )
     }
 
-    /// Run migrations from old version to current.
-    fn migrate(&mut self, from_version: i32) -> SqlResult<()> {
+    fn migrate(&mut self, from_version: i32, combat_cutoff: Option<i64>) -> SqlResult<()> {
+        self.register_legacy_repairs(from_version, combat_cutoff)?;
+        for column in ["skin_id", "tex1", "tex2"] {
+            let exists = self
+                .conn
+                .prepare("PRAGMA table_info(loot_drops)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<SqlResult<Vec<_>>>()?
+                .iter()
+                .any(|name| name == column);
+            if !exists {
+                self.conn.execute_batch(&format!(
+                    "ALTER TABLE loot_drops ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                ))?;
+            }
+        }
+        self.create_tables()?;
+        self.set_schema_version(SCHEMA_VERSION)
+    }
+
+    #[cfg(test)]
+    fn migrate_legacy_reference(&mut self, from_version: i32) -> SqlResult<()> {
         // Migration from v1 to v2: add skin_id column
         if from_version < 2 {
             self.conn.execute(
@@ -661,6 +709,7 @@ impl LootDatabase {
     /// Rewrite Loot History rows stored under a Shatters boss's revealed
     /// hard-mode name to the boss's own name plus the `(HM)` variant suffix,
     /// keeping the two lookups consistent.
+    #[cfg(test)]
     fn rename_shatters_hm_sources(&mut self) -> SqlResult<()> {
         for object_type in [
             crate::assets::SHATTERS_BRIDGE_SENTINEL_TYPE,
@@ -694,6 +743,7 @@ impl LootDatabase {
     /// colours, Blue for a colourless event bag). Idempotent: only bags on
     /// `mob_type` 0 or the taunt controller are considered, and the resolver
     /// returns `None` (no update) for colourless Unknown bags.
+    #[cfg(test)]
     fn backfill_killer_bee_nest(&mut self) -> SqlResult<()> {
         struct Bag {
             id: i64,
@@ -797,6 +847,7 @@ impl LootDatabase {
     /// no change. Boss Marks need a recorded kill (absent here) and are handled
     /// by [`Self::backfill_marks_by_dungeon_consensus`] instead. Idempotent: only
     /// touches `mob_type` 0 rows, never overriding an existing attribution.
+    #[cfg(test)]
     fn backfill_unknown_by_item_source(&mut self) -> SqlResult<()> {
         struct Bag {
             id: i64,
@@ -899,6 +950,7 @@ impl LootDatabase {
     /// to bags carrying that Mark in that dungeon, provided it is boss-like and a
     /// valid drop source. Skips curated dungeons (own Mark logic) and applies
     /// only when a clear winner exists. Idempotent (`mob_type` 0 only).
+    #[cfg(test)]
     fn backfill_marks_by_dungeon_consensus(&mut self) -> SqlResult<()> {
         let assets = get_asset_manager();
         let marks = assets.boss_mark_item_ids();
@@ -1036,6 +1088,7 @@ impl LootDatabase {
     /// ([`bag_matches_beisa_profile`](super::bag_matches_beisa_profile)) is his.
     /// Idempotent; a no-op when assets are unavailable and the bag holds no
     /// whitelisted potion. Bags that don't fit the profile are left Unknown.
+    #[cfg(test)]
     fn attribute_oryx_sanctuary_beisa(&mut self) -> SqlResult<()> {
         struct Bag {
             id: i64,
@@ -1113,6 +1166,7 @@ impl LootDatabase {
     /// structures) to Unknown, keeping the drop rows. Idempotent: only rows
     /// whose `mob_type` is positively classified invalid by the catalog are
     /// touched, so it is safe to re-run and a no-op when assets are unavailable.
+    #[cfg(test)]
     fn relabel_invalid_drop_sources(&mut self) -> SqlResult<()> {
         let mob_types: Vec<i32> = {
             let mut stmt = self
@@ -1147,6 +1201,7 @@ impl LootDatabase {
 
     /// Remap Ice Tomb bags stored with a soul object id onto the real boss
     /// object id, so the loot history draws the boss sprite. Idempotent.
+    #[cfg(test)]
     fn remap_ice_tomb_soul_ids(&mut self) -> SqlResult<()> {
         for boss in super::ICE_TOMB_BOSSES {
             let soul = super::ice_tomb_soul_for_boss(boss);
@@ -1172,6 +1227,7 @@ impl LootDatabase {
     /// main boss. This caps each of Bes/Geb/Nut at a single real bag, so a boss
     /// that proximity credited with two bags no longer keeps both while another
     /// main boss has none -- the extra is reassigned to the un-credited boss.
+    #[cfg(test)]
     fn backfill_tomb_of_the_ancients(&mut self) -> SqlResult<()> {
         struct Bag {
             id: i64,
@@ -1406,6 +1462,7 @@ impl LootDatabase {
     /// per boss to the still-un-credited bosses alphabetically. Bags already on
     /// an Ice Tomb boss seed the run and are left unchanged (re-run-safe). The
     /// event chest and other correctly-attributed non-boss bags are untouched.
+    #[cfg(test)]
     fn backfill_ice_tomb(&mut self) -> SqlResult<()> {
         struct Bag {
             id: i64,
@@ -1541,6 +1598,7 @@ impl LootDatabase {
 
     /// Backfill boss attribution for Unknown, non-brown bags whose items are a
     /// unique boss drop in their dungeon. Ambiguous bags stay Unknown.
+    #[cfg(test)]
     fn backfill_unique_boss_drops(&mut self) -> SqlResult<()> {
         struct Bag {
             id: i64,
@@ -1616,6 +1674,7 @@ impl LootDatabase {
     /// tracker would now produce (bags whose boss died offscreen, and ambiguous
     /// drop-table bags a confirmed kill disambiguates). Runs once; if no Combat
     /// History exists yet there is nothing to correlate and bags are left as-is.
+    #[cfg(test)]
     fn backfill_unknown_from_combat_fights(&mut self) -> SqlResult<bool> {
         let (kills, readable) = self.load_recorded_boss_kills();
         if !readable {
@@ -1628,6 +1687,7 @@ impl LootDatabase {
     /// Correlation core of [`backfill_unknown_from_combat_fights`], taking the
     /// recorded kills explicitly so it can be unit-tested against an in-memory
     /// database without touching the on-disk combat history.
+    #[cfg(test)]
     fn backfill_unknown_with_kills(&mut self, kills: &[super::RecentBossKill]) -> SqlResult<()> {
         if kills.is_empty() {
             return Ok(());
@@ -1738,6 +1798,7 @@ impl LootDatabase {
     /// The combat path is injected (see [`Self::open_writer`]) so this reads only
     /// the caller-supplied history, never a machine-wide default; tests can point
     /// it at a hermetic temporary database.
+    #[cfg(test)]
     fn load_recorded_boss_kills(&self) -> (Vec<super::RecentBossKill>, bool) {
         let Some(path) = self.combat_path.as_deref() else {
             return (Vec::new(), true);
@@ -1802,6 +1863,7 @@ impl LootDatabase {
     /// each dropping once. A bag proven to be a miniboss drop but not otherwise
     /// identifiable defaults to Oculon (the miniboss most prone to going
     /// unrecorded) unless a shard rules him out, in which case it stays Unknown.
+    #[cfg(test)]
     fn backfill_spectral_penitentiary(&mut self) -> SqlResult<()> {
         const MINIBOSS_CLUSTER_MS: i64 = 300_000;
         const OCULON: i32 = super::SPEN_OCULON_OBJECT_TYPE;
@@ -2017,6 +2079,7 @@ impl LootDatabase {
     /// Reclassify Unknown (`mob_type = 0`) bags in `dungeon` to the boss its
     /// items identify via `resolve`. When `exclude_brown` is set, brown bags are
     /// skipped (bosses never drop loot in brown bags, so those are public bags).
+    #[cfg(test)]
     fn backfill_unknown_by_item_signal(
         &mut self,
         dungeon: &str,
@@ -2256,164 +2319,16 @@ impl LootDatabase {
         offset: i64,
         limit: i64,
     ) -> SqlResult<Vec<LootDropRecord>> {
-        // Build dynamic SQL with optional filter clauses
-        // When filtering by item, we need to JOIN with loot_items
-        let has_item_filter = filters.item_id.is_some();
-
-        let mut sql = if has_item_filter {
-            String::from(
-                "SELECT DISTINCT d.* FROM loot_drops d \
-                 INNER JOIN loot_items i ON i.drop_id = d.id \
-                 WHERE d.timestamp >= ?1 AND d.timestamp <= ?2",
-            )
-        } else {
-            String::from("SELECT * FROM loot_drops WHERE timestamp >= ?1 AND timestamp <= ?2")
-        };
-
-        // Table alias prefix for column references when using JOIN
-        let col_prefix = if has_item_filter { "d." } else { "" };
-
-        // Track parameter index (starts at 3 since ?1 and ?2 are start/end)
-        let mut param_idx = 3;
-
-        // Filter the whole encounter, not just the selected variant, so a reskin
-        // source's drops recorded under the base id surface too (and vice versa).
-        let mob_variants = filters.mob_type.map(crate::assets::encounter_variant_types);
-        if let Some(variants) = &mob_variants {
-            let placeholders: Vec<String> = (0..variants.len())
-                .map(|i| format!("?{}", param_idx + i))
-                .collect();
-            sql.push_str(&format!(
-                " AND {}mob_type IN ({})",
-                col_prefix,
-                placeholders.join(", ")
-            ));
-            param_idx += variants.len();
-        }
-        if filters.dungeon.is_some() {
-            sql.push_str(&format!(" AND {}dungeon = ?{}", col_prefix, param_idx));
-            param_idx += 1;
-        }
-        if filters.char_id.is_some() {
-            sql.push_str(&format!(" AND {}char_id = ?{}", col_prefix, param_idx));
-            param_idx += 1;
-        }
-        if filters.item_id.is_some() {
-            sql.push_str(&format!(" AND i.item_id = ?{}", param_idx));
-            param_idx += 1;
-        }
-
-        // Free-text search across mob name, dungeon, and item name. A reskinned
-        // encounter matches by either of its names.
-        let search_like = filters
-            .search_text
-            .as_ref()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| format!("%{}%", s));
-        let alias_likes: Vec<String> = filters
-            .search_text
-            .as_deref()
-            .map(crate::assets::encounter_alias_names_matching)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|n| format!("%{}%", n))
-            .collect();
-        if search_like.is_some() {
-            // Qualify the outer drops id so it isn't shadowed by loot_items.id
-            // inside the correlated EXISTS subquery.
-            let drop_id_ref = if has_item_filter {
-                "d.id"
-            } else {
-                "loot_drops.id"
-            };
-            let p = col_prefix;
-            let mut idx = param_idx;
-            let mut name_parts = vec![format!("{p}mob_name LIKE ?{idx}")];
-            idx += 1;
-            for _ in &alias_likes {
-                name_parts.push(format!("{p}mob_name LIKE ?{idx}"));
-                idx += 1;
-            }
-            name_parts.push(format!("{p}dungeon LIKE ?{idx}"));
-            idx += 1;
-            name_parts.push(format!(
-                "EXISTS (SELECT 1 FROM loot_items li WHERE li.drop_id = {drop_id_ref} AND li.item_name LIKE ?{idx})"
-            ));
-            idx += 1;
-            param_idx = idx;
-            sql.push_str(&format!(" AND ({})", name_parts.join(" OR ")));
-        }
-
-        // Add bag type filter with IN clause.
-        // Some(non-empty) => restrict to those bag types.
-        // Some(empty) => user disabled all bag types, so match nothing.
-        // None => no bag-type restriction.
-        if let Some(ref bag_types) = filters.bag_types {
-            if !bag_types.is_empty() {
-                let placeholders: Vec<String> = (0..bag_types.len())
-                    .map(|i| format!("?{}", param_idx + i))
-                    .collect();
-                sql.push_str(&format!(
-                    " AND {}bag_type IN ({})",
-                    col_prefix,
-                    placeholders.join(", ")
-                ));
-                param_idx += bag_types.len();
-            } else {
-                sql.push_str(" AND 1=0");
-            }
-        }
-
-        sql.push_str(&format!(
-            " ORDER BY {}timestamp DESC LIMIT ?{} OFFSET ?{}",
-            col_prefix,
-            param_idx,
-            param_idx + 1
-        ));
-
+        let (predicate, mut params) = Self::drop_filter_sql(start, end, filters);
+        let sql = format!(
+            "SELECT d.* FROM loot_drops d WHERE {predicate} \
+             ORDER BY d.timestamp DESC, d.id DESC LIMIT ? OFFSET ?"
+        );
+        params.push(limit.into());
+        params.push(offset.into());
         let mut stmt = self.conn.prepare(&sql)?;
-
-        // Build parameter list dynamically using boxed trait objects
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        params.push(Box::new(start));
-        params.push(Box::new(end));
-
-        if let Some(variants) = &mob_variants {
-            for &v in variants {
-                params.push(Box::new(v));
-            }
-        }
-        if let Some(ref dung) = filters.dungeon {
-            params.push(Box::new(dung.clone()));
-        }
-        if let Some(char) = filters.char_id {
-            params.push(Box::new(char));
-        }
-        if let Some(item) = filters.item_id {
-            params.push(Box::new(item));
-        }
-        if let Some(ref like) = search_like {
-            params.push(Box::new(like.clone()));
-            for alias in &alias_likes {
-                params.push(Box::new(alias.clone()));
-            }
-            params.push(Box::new(like.clone()));
-            params.push(Box::new(like.clone()));
-        }
-        if let Some(ref bag_types) = filters.bag_types {
-            for &bt in bag_types {
-                params.push(Box::new(bt));
-            }
-        }
-        params.push(Box::new(limit));
-        params.push(Box::new(offset));
-
-        // Convert to slice of references for rusqlite
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-
         let drops = stmt
-            .query_map(param_refs.as_slice(), Self::row_to_drop)?
+            .query_map(rusqlite::params_from_iter(params), Self::row_to_drop)?
             .collect::<SqlResult<Vec<_>>>()?;
 
         let drops = self.apply_display_variants(drops)?;
@@ -2427,152 +2342,87 @@ impl LootDatabase {
         end: i64,
         filters: &SourceFilters,
     ) -> SqlResult<i64> {
-        // Build dynamic SQL with optional filter clauses
-        // When filtering by item, we need to JOIN with loot_items
-        let has_item_filter = filters.item_id.is_some();
+        let (predicate, params) = Self::drop_filter_sql(start, end, filters);
+        self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM loot_drops d WHERE {predicate}"),
+            rusqlite::params_from_iter(params),
+            |row| row.get(0),
+        )
+    }
 
-        let mut sql = if has_item_filter {
-            String::from(
-                "SELECT COUNT(DISTINCT d.id) FROM loot_drops d \
-                 INNER JOIN loot_items i ON i.drop_id = d.id \
-                 WHERE d.timestamp >= ?1 AND d.timestamp <= ?2",
-            )
-        } else {
-            String::from(
-                "SELECT COUNT(*) FROM loot_drops WHERE timestamp >= ?1 AND timestamp <= ?2",
-            )
-        };
-
-        // Table alias prefix for column references when using JOIN
-        let col_prefix = if has_item_filter { "d." } else { "" };
-
-        // Track parameter index (starts at 3 since ?1 and ?2 are start/end)
-        let mut param_idx = 3;
-
-        // Match the whole encounter (all reskin variants), as in get_drops_filtered.
-        let mob_variants = filters.mob_type.map(crate::assets::encounter_variant_types);
-        if let Some(variants) = &mob_variants {
-            let placeholders: Vec<String> = (0..variants.len())
-                .map(|i| format!("?{}", param_idx + i))
-                .collect();
-            sql.push_str(&format!(
-                " AND {}mob_type IN ({})",
-                col_prefix,
-                placeholders.join(", ")
-            ));
-            param_idx += variants.len();
+    fn drop_filter_sql(
+        start: i64,
+        end: i64,
+        filters: &SourceFilters,
+    ) -> (String, Vec<rusqlite::types::Value>) {
+        let mut sql = String::from("d.timestamp >= ? AND d.timestamp <= ?");
+        let mut params = vec![start.into(), end.into()];
+        if let Some(mob_type) = filters.mob_type {
+            sql.push_str(" AND d.mob_type IN (SELECT value FROM json_each(?))");
+            params.push(
+                serde_json::json!(crate::assets::encounter_variant_types(mob_type))
+                    .to_string()
+                    .into(),
+            );
         }
-        if filters.dungeon.is_some() {
-            sql.push_str(&format!(" AND {}dungeon = ?{}", col_prefix, param_idx));
-            param_idx += 1;
+        if let Some(dungeon) = &filters.dungeon {
+            sql.push_str(" AND d.dungeon = ?");
+            params.push(dungeon.clone().into());
         }
-        if filters.char_id.is_some() {
-            sql.push_str(&format!(" AND {}char_id = ?{}", col_prefix, param_idx));
-            param_idx += 1;
+        if let Some(char_id) = filters.char_id {
+            sql.push_str(" AND d.char_id = ?");
+            params.push(char_id.into());
         }
-        if filters.item_id.is_some() {
-            sql.push_str(&format!(" AND i.item_id = ?{}", param_idx));
-            param_idx += 1;
+        if let Some(item_id) = filters.item_id {
+            sql.push_str(
+                " AND EXISTS (SELECT 1 FROM loot_items i WHERE i.drop_id = d.id AND i.item_id = ?)",
+            );
+            params.push(item_id.into());
         }
-
-        // Free-text search across mob name, dungeon, and item name, matching a
-        // reskinned encounter by either of its names.
+        // This EXISTS is separate from source-item matching: the selected source
+        // item and the item satisfying both property groups may be different.
+        if filters.property_item_ids.is_some() || filters.property_rarities.is_some() {
+            sql.push_str(" AND EXISTS (SELECT 1 FROM loot_items i WHERE i.drop_id = d.id");
+            if let Some(ids) = &filters.property_item_ids {
+                sql.push_str(" AND i.item_id IN (SELECT value FROM json_each(?))");
+                // One JSON parameter avoids SQLite's bind limit for large asset sets.
+                params.push(serde_json::json!(ids).to_string().into());
+            }
+            if let Some(rarities) = &filters.property_rarities {
+                sql.push_str(" AND min(i.enchant_count, 4) IN (SELECT value FROM json_each(?))");
+                params.push(serde_json::json!(rarities).to_string().into());
+            }
+            sql.push(')');
+        }
         let search_like = filters
             .search_text
             .as_ref()
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .map(|s| format!("%{}%", s));
-        let alias_likes: Vec<String> = filters
-            .search_text
-            .as_deref()
-            .map(crate::assets::encounter_alias_names_matching)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|n| format!("%{}%", n))
-            .collect();
-        if search_like.is_some() {
-            let drop_id_ref = if has_item_filter {
-                "d.id"
-            } else {
-                "loot_drops.id"
-            };
-            let p = col_prefix;
-            let mut idx = param_idx;
-            let mut name_parts = vec![format!("{p}mob_name LIKE ?{idx}")];
-            idx += 1;
-            for _ in &alias_likes {
-                name_parts.push(format!("{p}mob_name LIKE ?{idx}"));
-                idx += 1;
+        if let Some(like) = search_like {
+            let mut name_parts = vec!["d.mob_name LIKE ?".to_string()];
+            params.push(like.clone().into());
+            for alias in crate::assets::encounter_alias_names_matching(
+                filters.search_text.as_deref().unwrap_or_default(),
+            ) {
+                name_parts.push("d.mob_name LIKE ?".to_string());
+                params.push(format!("%{alias}%").into());
             }
-            name_parts.push(format!("{p}dungeon LIKE ?{idx}"));
-            idx += 1;
-            name_parts.push(format!(
-                "EXISTS (SELECT 1 FROM loot_items li WHERE li.drop_id = {drop_id_ref} AND li.item_name LIKE ?{idx})"
-            ));
-            idx += 1;
-            param_idx = idx;
+            name_parts.push("d.dungeon LIKE ?".to_string());
+            params.push(like.clone().into());
+            name_parts.push(
+                "EXISTS (SELECT 1 FROM loot_items i WHERE i.drop_id = d.id AND i.item_name LIKE ?)"
+                    .to_string(),
+            );
+            params.push(like.into());
             sql.push_str(&format!(" AND ({})", name_parts.join(" OR ")));
         }
-
-        // Add bag type filter with IN clause.
-        // Some(non-empty) => restrict to those bag types.
-        // Some(empty) => user disabled all bag types, so match nothing.
-        // None => no bag-type restriction.
-        if let Some(ref bag_types) = filters.bag_types {
-            if !bag_types.is_empty() {
-                let placeholders: Vec<String> = (0..bag_types.len())
-                    .map(|i| format!("?{}", param_idx + i))
-                    .collect();
-                sql.push_str(&format!(
-                    " AND {}bag_type IN ({})",
-                    col_prefix,
-                    placeholders.join(", ")
-                ));
-            } else {
-                sql.push_str(" AND 1=0");
-            }
+        if let Some(bag_types) = &filters.bag_types {
+            sql.push_str(" AND d.bag_type IN (SELECT value FROM json_each(?))");
+            params.push(serde_json::json!(bag_types).to_string().into());
         }
-
-        let mut stmt = self.conn.prepare(&sql)?;
-
-        // Build parameter list dynamically using boxed trait objects
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        params.push(Box::new(start));
-        params.push(Box::new(end));
-
-        if let Some(variants) = &mob_variants {
-            for &v in variants {
-                params.push(Box::new(v));
-            }
-        }
-        if let Some(ref dung) = filters.dungeon {
-            params.push(Box::new(dung.clone()));
-        }
-        if let Some(char) = filters.char_id {
-            params.push(Box::new(char));
-        }
-        if let Some(item) = filters.item_id {
-            params.push(Box::new(item));
-        }
-        if let Some(ref like) = search_like {
-            params.push(Box::new(like.clone()));
-            for alias in &alias_likes {
-                params.push(Box::new(alias.clone()));
-            }
-            params.push(Box::new(like.clone()));
-            params.push(Box::new(like.clone()));
-        }
-        if let Some(ref bag_types) = filters.bag_types {
-            for &bt in bag_types {
-                params.push(Box::new(bt));
-            }
-        }
-
-        // Convert to slice of references for rusqlite
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-
-        stmt.query_row(param_refs.as_slice(), |row| row.get(0))
+        (sql, params)
     }
 
     /// Convert a database row to LootDropRecord (without items).
@@ -3234,6 +3084,458 @@ impl LootItemRecord {
 mod tests {
     use super::*;
 
+    fn load_loot_test_assets() -> bool {
+        let assets = get_asset_manager();
+        if let Some(dir) = crate::assets::find_assets_dir() {
+            assets.set_assets_dir(&dir);
+        }
+        if !assets.try_load() {
+            eprintln!("skipping asset-dependent deferred migration comparison");
+            return false;
+        }
+        true
+    }
+
+    fn assert_legacy_migration(db: &mut LootDatabase, version: i32) {
+        let loaded = load_loot_test_assets();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("reference-input.db");
+        db.conn
+            .execute("VACUUM main INTO ?1", [path.to_str().unwrap()])
+            .unwrap();
+        db.migrate_legacy_reference(version).unwrap();
+        if !loaded {
+            return;
+        }
+        let mut deferred = LootDatabase {
+            conn: Connection::open(path).unwrap(),
+            combat_path: db.combat_path.clone(),
+        };
+        deferred.migrate(version, None).unwrap();
+        finish_loot_repairs(&mut deferred);
+        assert_eq!(source_rows(&deferred), source_rows(db));
+    }
+
+    fn finish_loot_repairs(db: &mut LootDatabase) {
+        for _ in 0..100_000 {
+            if !db.historical_repair_batch().unwrap().1 {
+                return;
+            }
+        }
+        panic!("historical Loot repairs did not finish");
+    }
+
+    fn source_rows(db: &LootDatabase) -> Vec<(i64, i32, String)> {
+        db.conn
+            .prepare("SELECT id,mob_type,mob_name FROM loot_drops ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<SqlResult<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn legacy_loot_repairs_are_deferred_bounded_atomic_and_resumable() {
+        if !load_loot_test_assets() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("loot.db");
+        let db = LootDatabase::open_writer(&path, None).unwrap();
+        db.conn.execute_batch(
+            "WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<130)
+             INSERT INTO loot_drops(timestamp,dungeon,map_seed,char_id,char_name,class_id,fame,bag_type,mob_type,mob_name)
+             SELECT n,'The Shatters',1,1,'Player',768,0,7,29039,'King Azamoth' FROM seq;
+             PRAGMA user_version=23;"
+        ).unwrap();
+        db.close().unwrap();
+        let mut db = LootDatabase::open_writer(&path, None).unwrap();
+        assert_eq!(db.get_schema_version(), SCHEMA_VERSION);
+        assert!(source_rows(&db).iter().all(|row| row.2 == "King Azamoth"));
+        let lock = Connection::open(&path).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let started = std::time::Instant::now();
+        assert!(db.historical_repair_batch().is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        lock.execute_batch("ROLLBACK").unwrap();
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER fail_loot_progress BEFORE UPDATE ON legacy_loot_repairs
+             BEGIN SELECT RAISE(ABORT,'injected progress failure'); END;",
+            )
+            .unwrap();
+        assert!(db.historical_repair_batch().is_err());
+        assert!(source_rows(&db).iter().all(|row| row.2 == "King Azamoth"));
+        assert_eq!(
+            db.conn
+                .query_row(
+                    "SELECT cursor FROM legacy_loot_repairs WHERE repair_id='loot-024-names'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.conn
+                .query_row("PRAGMA busy_timeout", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            5000
+        );
+        db.conn
+            .execute_batch("DROP TRIGGER fail_loot_progress")
+            .unwrap();
+        assert_eq!(db.historical_repair_batch().unwrap(), (true, true));
+        assert_eq!(
+            source_rows(&db)
+                .iter()
+                .filter(|row| row.2 == "The Forgotten King (HM)")
+                .count(),
+            64
+        );
+        db.close().unwrap();
+        let mut db = LootDatabase::open_writer(&path, None).unwrap();
+        db.conn.execute(
+            "INSERT INTO loot_drops(timestamp,dungeon,map_seed,char_id,char_name,class_id,fame,bag_type,mob_type,mob_name)
+             VALUES (1000,'The Shatters',2,1,'Player',768,0,7,29039,'King Azamoth')",[],
+        ).unwrap();
+        finish_loot_repairs(&mut db);
+        assert_eq!(
+            source_rows(&db)
+                .iter()
+                .filter(|row| row.2 == "The Forgotten King (HM)")
+                .count(),
+            130
+        );
+        assert_eq!(source_rows(&db).last().unwrap().2, "King Azamoth");
+        assert_eq!(db.historical_repair_batch().unwrap(), (false, false));
+        db.close().unwrap();
+        let mut db = LootDatabase::open_writer(&path, None).unwrap();
+        assert_eq!(db.historical_repair_batch().unwrap(), (false, false));
+    }
+
+    #[test]
+    fn legacy_loot_registration_survives_late_schema_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("loot.db");
+        let mut db = LootDatabase::open_writer(&path, None).unwrap();
+        insert_realm_bag(
+            &mut db,
+            0,
+            1,
+            &[(super::super::MARK_OF_JANUS_ITEM_ID, "Mark")],
+        );
+        db.conn
+            .execute_batch(
+                "ALTER TABLE loot_drops DROP COLUMN skin_id;
+             ALTER TABLE loot_drops DROP COLUMN tex1;
+             ALTER TABLE loot_drops DROP COLUMN tex2;
+             DROP INDEX idx_items_drop_id;
+             ALTER TABLE loot_items RENAME TO saved_items;
+             CREATE VIEW loot_items AS SELECT * FROM saved_items;
+             PRAGMA user_version=1;",
+            )
+            .unwrap();
+        db.close().unwrap();
+        assert!(LootDatabase::open_writer(&path, None).is_err());
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i32>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT cutoff FROM legacy_loot_repairs WHERE repair_id='loot-004-janus'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        conn.execute_batch(
+            "DROP VIEW loot_items;
+             ALTER TABLE saved_items RENAME TO loot_items;
+             INSERT INTO loot_drops(timestamp,dungeon,map_seed,char_id,char_name,class_id,fame,bag_type,mob_type,mob_name)
+             VALUES (1000,'Realm',2,1,'Player',768,0,7,0,'Unknown');"
+        ).unwrap();
+        drop(conn);
+        let db = LootDatabase::open_writer(&path, None).unwrap();
+        assert_eq!(db.get_schema_version(), SCHEMA_VERSION);
+        assert_eq!(
+            db.conn
+                .query_row(
+                    "SELECT cutoff FROM legacy_loot_repairs WHERE repair_id='loot-004-janus'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn legacy_loot_grouped_repairs_keep_cross_batch_context_and_upper_medians() {
+        if !load_loot_test_assets() {
+            return;
+        }
+        let mut db = LootDatabase::open_in_memory().unwrap();
+        for _ in 0..130 {
+            insert_tomb_bag(
+                &mut db,
+                77,
+                LootBagType::Blue,
+                0,
+                "Unknown",
+                vec![(999_999, "Junk")],
+            );
+        }
+        insert_tomb_bag(
+            &mut db,
+            77,
+            LootBagType::Blue,
+            super::super::TOMB_BES_OBJECT_TYPE,
+            "Bes",
+            vec![(999_999, "Junk")],
+        );
+        for _ in 0..130 {
+            insert_tomb_bag(
+                &mut db,
+                0,
+                LootBagType::Blue,
+                0,
+                "Unknown",
+                vec![(super::super::POTION_OF_LIFE_ITEM_ID, "Life")],
+            );
+        }
+        let mut early = Vec::new();
+        let mut late = Vec::new();
+        for n in 0..128 {
+            let id = insert_realm_bag(&mut db, 0, 0, &[(9068, "Wisdom"), (2794, "Mana")]);
+            let timestamp = if n < 64 { 0 } else { 600_000 };
+            db.conn
+                .execute(
+                    "UPDATE loot_drops SET dungeon=?2,timestamp=?3 WHERE id=?1",
+                    params![id, super::super::SPECTRAL_PENITENTIARY_NAME, timestamp],
+                )
+                .unwrap();
+            if n < 64 {
+                early.push(id);
+            } else {
+                late.push(id);
+            }
+        }
+        let reliable = insert_realm_bag(&mut db, 0, 0, &[(23915, "Zole White")]);
+        db.conn
+            .execute(
+                "UPDATE loot_drops SET dungeon=?2 WHERE id=?1",
+                params![reliable, super::super::SPECTRAL_PENITENTIARY_NAME],
+            )
+            .unwrap();
+        for _ in 0..130 {
+            insert_ice_tomb_bag(
+                &mut db,
+                88,
+                LootBagType::White,
+                0,
+                "Unknown",
+                vec![(5139, "Freezing Quiver")],
+            );
+        }
+        insert_ice_tomb_bag(
+            &mut db,
+            88,
+            LootBagType::White,
+            0,
+            "Unknown",
+            vec![(32724, "Frimarra")],
+        );
+        assert_legacy_migration(&mut db, 3);
+        for id in early {
+            assert_eq!(drop_source(&db, id).0, 0);
+        }
+        for id in late {
+            assert_eq!(
+                drop_source(&db, id).0,
+                super::super::SPEN_OCULON_OBJECT_TYPE
+            );
+        }
+        assert_eq!(
+            drop_source(&db, reliable).0,
+            super::super::SPEN_ZOLE_OBJECT_TYPE
+        );
+    }
+
+    #[test]
+    fn legacy_loot_consensus_preserves_item_votes_and_first_mark() {
+        if !load_loot_test_assets() {
+            return;
+        }
+        let assets = get_asset_manager();
+        let Some(boss) = assets.object_id_for_name("Septavius the Ghost God") else {
+            return;
+        };
+        let Some(other_mark) = assets
+            .boss_mark_item_ids()
+            .into_iter()
+            .find(|mark| *mark != 7718)
+        else {
+            return;
+        };
+        let mut db = LootDatabase::open_in_memory().unwrap();
+        let winner = insert_realm_bag(&mut db, boss, 9, &[(7718, "Mark"), (7718, "Mark")]);
+        let runner = insert_realm_bag(&mut db, boss, 9, &[(7718, "Mark")]);
+        db.conn
+            .execute(
+                "UPDATE loot_drops SET dungeon='The Snake Pit',mob_name=?2 WHERE id=?1",
+                params![winner, "Winner"],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE loot_drops SET dungeon='The Snake Pit',mob_name=?2 WHERE id=?1",
+                params![runner, "Runner"],
+            )
+            .unwrap();
+        for _ in 0..130 {
+            let id = insert_realm_bag(&mut db, 0, 9, &[(7718, "Mark")]);
+            db.conn
+                .execute(
+                    "UPDATE loot_drops SET dungeon='The Snake Pit' WHERE id=?1",
+                    [id],
+                )
+                .unwrap();
+        }
+        let first_other =
+            insert_realm_bag(&mut db, 0, 9, &[(other_mark, "Other Mark"), (7718, "Mark")]);
+        db.conn
+            .execute(
+                "UPDATE loot_drops SET dungeon='The Snake Pit' WHERE id=?1",
+                [first_other],
+            )
+            .unwrap();
+        assert_legacy_migration(&mut db, 21);
+        assert_eq!(drop_source(&db, winner).1, "Winner");
+        assert_eq!(drop_source(&db, first_other).0, 0);
+        assert_eq!(drop_source(&db, runner + 1), (boss, "Winner".to_string()));
+    }
+
+    #[test]
+    fn final_combat_correlation_inherits_completed_job_cutoffs() {
+        for version in [22, SCHEMA_VERSION] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("loot.db");
+            let db = LootDatabase::open_writer(&path, None).unwrap();
+            assert!(!db.awaits_combat_completion().unwrap());
+            db.conn.execute_batch(
+            "INSERT INTO loot_drops(timestamp,dungeon,map_seed,char_id,char_name,class_id,fame,bag_type,mob_type,mob_name)
+             VALUES(1,'Realm',77,1,'Player',768,0,1292,0,'Unknown'),
+                   (2,'Realm',77,1,'Player',768,0,1292,0,'Unknown'),
+                   (3,'Realm',77,1,'Player',768,0,1292,0,'Unknown');
+             INSERT INTO legacy_loot_repairs
+                 (repair_id,ordinal,cutoff,combat_cutoff,cursor,complete)
+             VALUES('loot-023-combat',26,1,7,1,1);"
+        ).unwrap();
+            db.conn
+                .execute_batch(&format!("PRAGMA user_version={version}"))
+                .unwrap();
+            db.close().unwrap();
+
+            let db = LootDatabase::open_writer_at_combat_cutoff(&path, None, Some(99)).unwrap();
+            db.conn
+                .execute(
+                    "UPDATE legacy_loot_repairs SET complete=1
+             WHERE repair_id!='loot-023-combat-final'",
+                    [],
+                )
+                .unwrap();
+            assert!(db.awaits_combat_completion().unwrap());
+            let checkpoint_sql = "SELECT cursor,cutoff,combat_cutoff,complete
+            FROM legacy_loot_repairs WHERE repair_id='loot-023-combat-final'";
+            let checkpoint: (i64, i64, i64, bool) = db
+                .conn
+                .query_row(checkpoint_sql, [], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })
+                .unwrap();
+            assert_eq!(checkpoint, (0, 1, 7, false));
+            db.conn
+                .execute(
+                    "UPDATE legacy_loot_repairs SET cursor=1,complete=1
+                 WHERE repair_id='loot-023-combat-final'",
+                    [],
+                )
+                .unwrap();
+            db.close().unwrap();
+
+            let db = LootDatabase::open_writer_at_combat_cutoff(&path, None, Some(100)).unwrap();
+            assert!(!db.awaits_combat_completion().unwrap());
+            let checkpoint: (i64, i64, i64, bool) = db
+                .conn
+                .query_row(checkpoint_sql, [], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })
+                .unwrap();
+            assert_eq!(checkpoint, (1, 1, 7, true));
+        }
+    }
+
+    #[test]
+    fn legacy_loot_correlation_freezes_fights_and_retries_unavailable_history() {
+        if !load_loot_test_assets() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let loot = temp.path().join("loot.db");
+        let combat = temp.path().join("combat.db");
+        let mut db = LootDatabase::open_writer(&loot, None).unwrap();
+        let id = insert_realm_bag(&mut db, 0, 77, &[(7718, "Mark of Septavius")]);
+        db.conn
+            .execute(
+                "UPDATE loot_drops SET dungeon='Synthetic Dungeon' WHERE id=?1",
+                [id],
+            )
+            .unwrap();
+        db.conn.execute_batch("PRAGMA user_version=22").unwrap();
+        db.close().unwrap();
+        let mut db = LootDatabase::open_writer(&loot, Some(&combat)).unwrap();
+        assert_eq!(db.historical_repair_batch().unwrap(), (false, true));
+        assert!(
+            !combat.exists(),
+            "a repair must not create the paired database"
+        );
+        db.close().unwrap();
+        let conn = Connection::open(&combat).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE fights(id INTEGER PRIMARY KEY,map_seed INTEGER,boss_object_type INTEGER,
+                boss_name TEXT,started_at INTEGER,ended_at INTEGER,killed INTEGER);
+             INSERT INTO fights VALUES(1,77,123,'Historical Boss',0,1000,1);",
+        )
+        .unwrap();
+        drop(conn);
+        let mut db =
+            LootDatabase::open_writer_at_combat_cutoff(&loot, Some(&combat), Some(1)).unwrap();
+        let conn = Connection::open(&combat).unwrap();
+        conn.execute(
+            "INSERT INTO fights VALUES(2,77,456,'Later Live Boss',2000,3000,1)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let hidden = temp.path().join("combat-unavailable.db");
+        std::fs::rename(&combat, &hidden).unwrap();
+        assert!(db.historical_repair_batch().is_err());
+        assert!(!combat.exists());
+        assert_eq!(drop_source(&db, id).0, 0);
+        std::fs::rename(&hidden, &combat).unwrap();
+        finish_loot_repairs(&mut db);
+        assert_eq!(drop_source(&db, id), (123, "Historical Boss".to_string()));
+        assert_eq!(db.conn.query_row(
+            "SELECT combat_cutoff FROM legacy_loot_repairs WHERE repair_id='loot-023-combat'",
+            [],|r|r.get::<_,i64>(0)).unwrap(),1);
+    }
+
     fn create_test_player() -> PlayerSnapshot {
         PlayerSnapshot {
             char_id: 1234,
@@ -3648,13 +3950,13 @@ mod tests {
     }
 
     fn drop_source(db: &LootDatabase, id: i64) -> (i32, String) {
-        let d = db
-            .get_recent_drops(50)
+        db.conn
+            .query_row(
+                "SELECT mob_type,mob_name FROM loot_drops WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
             .unwrap()
-            .into_iter()
-            .find(|d| d.id == id)
-            .unwrap();
-        (d.mob_type, d.mob_name)
     }
 
     #[test]
@@ -3775,7 +4077,7 @@ mod tests {
         let mut db = LootDatabase::open_in_memory().unwrap();
         // 20764 = Token of Happiness (Ethereal Shrine, non-seasonal biomes).
         let id = insert_realm_bag(&mut db, 0, 77, &[(20764, "Token of Happiness")]);
-        db.migrate(21).unwrap();
+        assert_legacy_migration(&mut db, 21);
 
         assert_eq!(drop_source(&db, id).0, shrine);
     }
@@ -3796,7 +4098,7 @@ mod tests {
         let mut db = LootDatabase::open_in_memory().unwrap();
         // 3078 = Seal of Blasphemous Prayer (multiple sources).
         let id = insert_realm_bag(&mut db, 0, 77, &[(3078, "Seal of Blasphemous Prayer")]);
-        db.migrate(21).unwrap();
+        assert_legacy_migration(&mut db, 21);
 
         assert_eq!(drop_source(&db, id), (0, "Unknown".to_string()));
     }
@@ -3842,7 +4144,7 @@ mod tests {
         insert(&mut db, sep, "Septavius the Ghost God");
         let unknown = insert(&mut db, 0, "Unknown");
 
-        db.migrate(21).unwrap();
+        assert_legacy_migration(&mut db, 21);
 
         assert_eq!(
             drop_source(&db, unknown),
@@ -3883,7 +4185,7 @@ mod tests {
             })
             .unwrap();
 
-        db.migrate(21).unwrap();
+        assert_legacy_migration(&mut db, 21);
 
         assert_eq!(drop_source(&db, unknown), (0, "Unknown".to_string()));
     }
@@ -3916,7 +4218,7 @@ mod tests {
         let regular = insert(&mut db, shatters, 29039, "The Forgotten King");
         let elsewhere = insert(&mut db, "Other Dungeon", 29039, "King Azamoth");
 
-        db.migrate(23).unwrap();
+        assert_legacy_migration(&mut db, 23);
 
         assert_eq!(db.get_schema_version(), SCHEMA_VERSION);
         assert_eq!(drop_source(&db, king).1, "The Forgotten King (HM)");
@@ -3998,7 +4300,7 @@ mod tests {
             })
             .unwrap();
 
-        db.migrate(3).unwrap();
+        assert_legacy_migration(&mut db, 3);
 
         let drops = db.get_recent_drops(10).unwrap();
         let janus_row = drops.iter().find(|d| d.id == janus).unwrap();
@@ -4084,7 +4386,7 @@ mod tests {
             })
             .unwrap();
 
-        db.migrate(17).unwrap();
+        assert_legacy_migration(&mut db, 17);
 
         let drops = db.get_recent_drops(20).unwrap();
         let row = |id: i64| drops.iter().find(|d| d.id == id).unwrap();
@@ -4124,7 +4426,7 @@ mod tests {
             .unwrap();
 
         // Migrating from v18 (not v17) must still repair it via the v19 gate.
-        db.migrate(18).unwrap();
+        assert_legacy_migration(&mut db, 18);
 
         let drops = db.get_recent_drops(10).unwrap();
         let row = drops.iter().find(|d| d.id == pot_bag).unwrap();
@@ -4189,7 +4491,7 @@ mod tests {
             })
             .unwrap();
 
-        db.migrate(4).unwrap();
+        assert_legacy_migration(&mut db, 4);
 
         let drops = db.get_recent_drops(10).unwrap();
         let pyyr_row = drops.iter().find(|d| d.id == pyyr).unwrap();
@@ -4276,7 +4578,7 @@ mod tests {
             vec![(2794, "Potion of Mana")],
         );
 
-        db.migrate(5).unwrap();
+        assert_legacy_migration(&mut db, 5);
 
         let drops = db.get_recent_drops(10).unwrap();
         let f = |id: i64| drops.iter().find(|d| d.id == id).unwrap();
@@ -4342,7 +4644,7 @@ mod tests {
             })
             .unwrap();
 
-        db.migrate(5).unwrap();
+        assert_legacy_migration(&mut db, 5);
 
         let drops = db.get_recent_drops(10).unwrap();
         let f = |id: i64| drops.iter().find(|d| d.id == id).unwrap();
@@ -4396,7 +4698,7 @@ mod tests {
         // A Helmet Rune is boss-only and narrows to Oculon/Gretch: Oculon default.
         let rune = insert(4, LootBagType::Blue, vec![(10024, "Helmet Rune")]);
 
-        db.migrate(5).unwrap();
+        assert_legacy_migration(&mut db, 5);
 
         let drops = db.get_recent_drops(10).unwrap();
         let f = |id: i64| drops.iter().find(|d| d.id == id).unwrap();
@@ -4431,7 +4733,7 @@ mod tests {
             })
             .unwrap();
 
-        db.migrate(5).unwrap();
+        assert_legacy_migration(&mut db, 5);
 
         let drops = db.get_recent_drops(10).unwrap();
         // Plague pair excludes Oculon and neither Lobotomik nor Zole is confirmed
@@ -4496,7 +4798,7 @@ mod tests {
             vec![(9998, "Junk2")],
         );
 
-        db.migrate(7).unwrap();
+        assert_legacy_migration(&mut db, 7);
 
         let drops = db.get_recent_drops(10).unwrap();
         let f = |id: i64| drops.iter().find(|d| d.id == id).unwrap();
@@ -4518,7 +4820,7 @@ mod tests {
             vec![(9999, "Junk")],
         );
 
-        db.migrate(7).unwrap();
+        assert_legacy_migration(&mut db, 7);
 
         assert_eq!(
             db.get_recent_drops(10)
@@ -4544,7 +4846,7 @@ mod tests {
             vec![(9999, "Junk")],
         );
 
-        db.migrate(7).unwrap();
+        assert_legacy_migration(&mut db, 7);
 
         assert_eq!(
             db.get_recent_drops(10)
@@ -4579,7 +4881,7 @@ mod tests {
             vec![(9998, "Junk2")],
         );
 
-        db.migrate(7).unwrap();
+        assert_legacy_migration(&mut db, 7);
 
         let drops = db.get_recent_drops(10).unwrap();
         let f = |id: i64| drops.iter().find(|d| d.id == id).unwrap();
@@ -4610,7 +4912,7 @@ mod tests {
             vec![(9998, "Junk2")],
         );
 
-        db.migrate(7).unwrap();
+        assert_legacy_migration(&mut db, 7);
 
         let drops = db.get_recent_drops(10).unwrap();
         let f = |id: i64| drops.iter().find(|d| d.id == id).unwrap();
@@ -4635,7 +4937,7 @@ mod tests {
             })
             .collect();
 
-        db.migrate(7).unwrap();
+        assert_legacy_migration(&mut db, 7);
 
         let drops = db.get_recent_drops(10).unwrap();
         let f = |id: i64| drops.iter().find(|d| d.id == id).unwrap();
@@ -4686,7 +4988,7 @@ mod tests {
             vec![(super::super::POTION_OF_LIFE_ITEM_ID, "Potion of Life")],
         );
 
-        db.migrate(7).unwrap();
+        assert_legacy_migration(&mut db, 7);
 
         let drops = db.get_recent_drops(10).unwrap();
         let f = |id: i64| drops.iter().find(|d| d.id == id).unwrap();
@@ -4728,7 +5030,7 @@ mod tests {
         );
 
         // Coming from v8 (only the v9 re-run applies).
-        db.migrate(8).unwrap();
+        assert_legacy_migration(&mut db, 8);
 
         let drops = db.get_recent_drops(10).unwrap();
         let f = |id: i64| drops.iter().find(|d| d.id == id).unwrap();
@@ -4758,7 +5060,7 @@ mod tests {
         );
 
         // Full chain (v7 backfill, v8 backfill, v9 re-run) must be stable.
-        db.migrate(7).unwrap();
+        assert_legacy_migration(&mut db, 7);
         let after_first: Vec<i32> = db
             .get_recent_drops(10)
             .unwrap()
@@ -4823,7 +5125,7 @@ mod tests {
         );
 
         // Coming from v10 (only the v11 re-run applies).
-        db.migrate(10).unwrap();
+        assert_legacy_migration(&mut db, 10);
 
         let drops = db.get_recent_drops(10).unwrap();
         let f = |id: i64| drops.iter().find(|d| d.id == id).unwrap();
@@ -4872,7 +5174,7 @@ mod tests {
             vec![(super::super::MARK_OF_GEB_ITEM_ID, "Mark of Geb")],
         );
 
-        db.migrate(10).unwrap();
+        assert_legacy_migration(&mut db, 10);
 
         let drops = db.get_recent_drops(10).unwrap();
         let f = |id: i64| drops.iter().find(|d| d.id == id).unwrap();
@@ -4915,7 +5217,7 @@ mod tests {
             vec![(super::super::POTION_OF_LIFE_ITEM_ID, "Potion of Life")],
         );
 
-        db.migrate(10).unwrap();
+        assert_legacy_migration(&mut db, 10);
 
         let drops = db.get_recent_drops(10).unwrap();
         let f = |id: i64| drops.iter().find(|d| d.id == id).unwrap();
@@ -4970,7 +5272,7 @@ mod tests {
         );
 
         // Coming from v13: only the v14 re-run applies.
-        db.migrate(13).unwrap();
+        assert_legacy_migration(&mut db, 13);
 
         let drops = db.get_recent_drops(10).unwrap();
         let f = |id: i64| drops.iter().find(|d| d.id == id).unwrap();
@@ -5029,7 +5331,7 @@ mod tests {
             vec![(super::super::POTION_OF_LIFE_ITEM_ID, "Potion of Life")],
         );
 
-        db.migrate(11).unwrap();
+        assert_legacy_migration(&mut db, 11);
 
         let drops = db.get_recent_drops(10).unwrap();
         let f = |id: i64| drops.iter().find(|d| d.id == id).unwrap();
@@ -5303,6 +5605,354 @@ mod tests {
 
         filters.clear();
         assert!(filters.is_empty());
+    }
+
+    #[test]
+    fn property_filters_require_one_item_to_match_both_groups() {
+        let mut db = LootDatabase::open_in_memory().unwrap();
+        let mut insert = |items: &[(i32, usize)]| {
+            db.insert_loot_drop(&NewLootDrop {
+                timestamp: 1_000,
+                player: create_test_player(),
+                bag_type: LootBagType::White,
+                mob_type: 100,
+                mob_name: "Boss".to_string(),
+                items: items
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, &(id, count))| NewLootItem {
+                        slot: slot as i32,
+                        item_id: id,
+                        item_name: format!("Item {id}"),
+                        enchant_ids: (0..count as i32).collect(),
+                    })
+                    .collect(),
+            })
+            .unwrap()
+        };
+        let split = insert(&[(10, 0), (20, 4)]);
+        let matching = insert(&[(10, 5), (20, 0), (10, 4)]);
+        let other_type = insert(&[(30, 4)]);
+        insert(&[]);
+        let mut filters = SourceFilters {
+            property_item_ids: Some(vec![10, 30]),
+            property_rarities: Some(vec![4]),
+            ..Default::default()
+        };
+        let drops = db.get_drops_filtered(0, 2_000, &filters, 0, 100).unwrap();
+        assert_eq!(
+            drops.iter().map(|d| d.id).collect::<Vec<_>>(),
+            vec![other_type, matching]
+        );
+        assert!(!drops.iter().any(|d| d.id == split));
+        assert_eq!(db.count_drops_filtered(0, 2_000, &filters).unwrap(), 2);
+        let whole_bag = drops.iter().find(|d| d.id == matching).unwrap();
+        assert_eq!(whole_bag.items.len(), 3);
+        assert_eq!(whole_bag.items[1].item_id, 20);
+        for item in &whole_bag.items {
+            assert_eq!(item.enchant_count as usize, item.parsed_enchant_ids.len());
+        }
+
+        // A source-item match may be a different item in the same bag.
+        filters.item_id = Some(20);
+        filters.mob_type = Some(100);
+        filters.dungeon = Some(create_test_player().dungeon);
+        filters.char_id = Some(create_test_player().char_id);
+        filters.bag_types = Some(vec![LootBagType::White.id()]);
+        filters.search_text = Some("  item 20  ".to_string());
+        let drops = db.get_drops_filtered(1_000, 1_000, &filters, 0, 1).unwrap();
+        assert_eq!(drops.len(), 1);
+        assert_eq!(drops[0].id, matching);
+        assert_eq!(db.count_drops_filtered(1_000, 1_000, &filters).unwrap(), 1);
+        assert_eq!(db.count_drops_filtered(1_001, 2_000, &filters).unwrap(), 0);
+    }
+
+    #[test]
+    fn property_filter_empty_and_large_sets_keep_row_count_parity() {
+        let mut db = LootDatabase::open_in_memory().unwrap();
+        db.insert_loot_drop(&NewLootDrop {
+            timestamp: 1_000,
+            player: create_test_player(),
+            bag_type: LootBagType::White,
+            mob_type: 100,
+            mob_name: "Boss".to_string(),
+            items: vec![NewLootItem {
+                slot: 0,
+                item_id: 40_000,
+                item_name: "Item".to_string(),
+                enchant_ids: vec![1, 2],
+            }],
+        })
+        .unwrap();
+        for (ids, rarities, expected) in [
+            (Some(vec![]), None, 0),
+            (None, Some(vec![]), 0),
+            (Some((0..40_001).collect()), Some(vec![0, 2, 4]), 1),
+            (Some(vec![40_000]), Some(vec![0, 1, 3, 4]), 0),
+            (None, None, 1),
+        ] {
+            let filters = SourceFilters {
+                property_item_ids: ids,
+                property_rarities: rarities,
+                ..Default::default()
+            };
+            assert_eq!(
+                db.get_drops_filtered(0, 2_000, &filters, 0, 100)
+                    .unwrap()
+                    .len(),
+                expected
+            );
+            assert_eq!(
+                db.count_drops_filtered(0, 2_000, &filters).unwrap(),
+                expected as i64
+            );
+        }
+    }
+
+    #[test]
+    fn source_clear_preserves_property_toggles() {
+        let mut filters = SourceFilters {
+            mob_type: Some(100),
+            item_id: Some(20),
+            search_text: Some("Boss".to_string()),
+            bag_types: Some(vec![7]),
+            property_item_ids: Some(vec![10]),
+            property_rarities: Some(vec![4]),
+            ..Default::default()
+        };
+        filters.clear();
+        assert!(filters.is_empty());
+        assert_eq!(filters.bag_types, Some(vec![7]));
+        assert_eq!(filters.property_item_ids, Some(vec![10]));
+        assert_eq!(filters.property_rarities, Some(vec![4]));
+    }
+
+    fn large_loot_fixture(path: &Path) -> LootDatabase {
+        let db = LootDatabase::open_writer(path, None).unwrap();
+        db.conn
+            .execute_batch(
+                "BEGIN;
+             WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<90000)
+             INSERT INTO loot_drops
+                 (timestamp, dungeon, map_seed, char_id, char_name, class_id,
+                  fame, bag_type, mob_type, mob_name)
+             SELECT 1000, 'Synthetic Dungeon', n, 1, 'Synthetic Player', 768,
+                    0, 7, 100, 'Synthetic Boss' FROM seq;
+             INSERT INTO loot_items (drop_id, slot, item_id, item_name, enchant_count, enchant_ids)
+             SELECT d.id, s.slot, 10+s.slot, 'Synthetic equipment item',
+                    CASE WHEN d.id%401=0 AND s.slot=0 THEN 4 ELSE 0 END,
+                    CASE WHEN d.id%401=0 AND s.slot=0 THEN '1,2,3,4' ELSE '' END
+             FROM loot_drops d CROSS JOIN
+                  (SELECT 0 AS slot UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3) s;
+             COMMIT;
+             PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+        db
+    }
+
+    #[test]
+    fn legacy_loot_repairs_at_large_paired_database_size() {
+        if !load_loot_test_assets() {
+            return;
+        }
+        assert!(get_asset_manager().is_valid_drop_source(45712));
+        let temp = tempfile::tempdir().unwrap();
+        let combat = temp.path().join("combat.db");
+        crate::combat::CombatDatabase::open_writer(&combat)
+            .unwrap()
+            .close()
+            .unwrap();
+        let conn = Connection::open(&combat).unwrap();
+        conn.execute_batch(
+            "BEGIN;
+             WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<12000)
+             INSERT INTO fights(started_at,ended_at,dungeon,map_seed,boss_object_type,boss_name,
+                 boss_max_hp,boss_start_hp,local_object_id,local_char_id,killed)
+             SELECT n*1000,n*1000+500,'Fungal Cavern',n,45712,
+                 'Synthetic Crystal Worm Mother',100000,100000,10,1,1 FROM seq;
+             WITH RECURSIVE slots(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM slots WHERE n<43)
+             INSERT INTO fight_participants(fight_id,object_id,object_type,name,equip0,equip1,equip2,equip3,
+                 damage,hits,is_local,provenance,end_status,damage_taken,enchants)
+             SELECT f.id,100+s.n,768,'Player'||s.n,2594,2595,2596,2597,1000,10,s.n=0,
+                 'observed','present',5000,
+                 '10000,10001,10002;10000,10001,10002;10000,10001,10002;10000,10001,10002'
+             FROM fights f CROSS JOIN slots s WHERE s.n<43 OR f.id<=4000;
+             COMMIT;
+             PRAGMA wal_checkpoint(TRUNCATE);"
+        ).unwrap();
+        drop(conn);
+        let loot = temp.path().join("loot.db");
+        let db = large_loot_fixture(&loot);
+        db.conn
+            .execute_batch(
+                "BEGIN;
+             UPDATE loot_drops SET map_seed=id%12000+1,timestamp=(id%12000+1)*1000+501,
+                 bag_type=1292,mob_type=CASE WHEN id%17=0 THEN 0 ELSE 45712 END,
+                 mob_name='Crystal Worm Mother';
+             UPDATE loot_drops SET dungeon='Tomb of the Ancients',mob_type=0 WHERE id%19=0;
+             UPDATE loot_drops SET dungeon='Spectral Penitentiary',mob_type=0
+                 WHERE id%23=0 AND dungeon='Synthetic Dungeon';
+             UPDATE loot_drops SET dungeon='Ice Tomb',mob_type=0
+                 WHERE id%29=0 AND dungeon='Synthetic Dungeon';
+             UPDATE loot_items SET item_id=7718 WHERE slot=0 AND drop_id%97=0;
+             UPDATE loot_items SET item_id=9068 WHERE slot=0 AND drop_id IN
+                 (SELECT id FROM loot_drops WHERE dungeon='Spectral Penitentiary');
+             UPDATE loot_items SET item_id=2794 WHERE slot=1 AND drop_id IN
+                 (SELECT id FROM loot_drops WHERE dungeon='Spectral Penitentiary');
+             UPDATE loot_items SET item_id=5139 WHERE slot=0 AND drop_id IN
+                 (SELECT id FROM loot_drops WHERE dungeon='Ice Tomb');
+             PRAGMA user_version=3;
+             COMMIT;
+             PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+        db.close().unwrap();
+        let before = std::fs::metadata(&loot).unwrap().len();
+        let combat_size = std::fs::metadata(&combat).unwrap().len();
+        assert!(
+            before >= 33 * 1_048_576,
+            "loot fixture must cover at least 33 MiB"
+        );
+        assert!(
+            combat_size >= 90 * 1_048_576,
+            "paired combat fixture must cover at least 90 MiB"
+        );
+        println!(
+            "Legacy fixture: Loot={:.2} MiB, Combat={:.2} MiB",
+            before as f64 / 1_048_576.0,
+            combat_size as f64 / 1_048_576.0
+        );
+        let reference_path = temp.path().join("reference-loot.db");
+        std::fs::copy(&loot, &reference_path).unwrap();
+        let mut reference = LootDatabase {
+            conn: Connection::open(&reference_path).unwrap(),
+            combat_path: Some(combat.clone()),
+        };
+        let started = std::time::Instant::now();
+        reference.migrate_legacy_reference(3).unwrap();
+        println!("Former legacy Loot migration: {:?}", started.elapsed());
+        let started = std::time::Instant::now();
+        let mut db = LootDatabase::open_writer(&loot, Some(&combat)).unwrap();
+        println!("Deferred Loot schema-only open: {:?}", started.elapsed());
+        let started = std::time::Instant::now();
+        let mut batches = 0;
+        let mut slowest = std::time::Duration::ZERO;
+        loop {
+            let step = std::time::Instant::now();
+            let pending = db.historical_repair_batch().unwrap().1;
+            slowest = slowest.max(step.elapsed());
+            batches += 1;
+            assert!(batches < 100_000);
+            if !pending {
+                break;
+            }
+        }
+        println!(
+            "Deferred Loot repairs: {batches} batches, active={:?}, slowest={slowest:?}",
+            started.elapsed()
+        );
+        assert_eq!(source_rows(&db), source_rows(&reference));
+        assert_eq!(
+            db.conn
+                .query_row("SELECT COUNT(*) FROM loot_items", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            360_000
+        );
+        for table in [
+            "legacy_loot_runs",
+            "legacy_loot_candidates",
+            "legacy_loot_votes",
+        ] {
+            assert_eq!(
+                db.conn
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        let plan: Vec<String> = db
+            .conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT drop_id FROM legacy_loot_candidates
+             WHERE (map_seed,boss,timestamp,drop_id)>(0,0,0,0)
+             ORDER BY map_seed,boss,timestamp,drop_id LIMIT 64",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(3))
+            .unwrap()
+            .collect::<SqlResult<_>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|line| line.contains("idx_legacy_loot_candidates")),
+            "{plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|line| line.contains("TEMP B-TREE")),
+            "{plan:?}"
+        );
+        db.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+        reference
+            .conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+        println!(
+            "Paired fixture: combat={:.2} MiB; loot before={:.2} MiB, former repaired={:.2} MiB, deferred repaired={:.2} MiB",
+            combat_size as f64/1_048_576.0,before as f64/1_048_576.0,
+            std::fs::metadata(&reference_path).unwrap().len() as f64/1_048_576.0,
+            std::fs::metadata(&loot).unwrap().len() as f64/1_048_576.0,
+        );
+    }
+
+    #[test]
+    fn sparse_property_history_pages_matching_bags_at_large_database_size() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("loot.db");
+        let _writer = large_loot_fixture(&path);
+        let filters = SourceFilters {
+            property_item_ids: Some(vec![10]),
+            property_rarities: Some(vec![4]),
+            ..Default::default()
+        };
+        let reader = LootDatabase::open_reader_at(&path).unwrap();
+        let started = std::time::Instant::now();
+        let total = reader.count_drops_filtered(0, 2_000, &filters).unwrap();
+        assert_eq!(total, 224);
+        let mut ids = Vec::new();
+        for (offset, expected) in [(0, 100), (100, 100), (200, 24)] {
+            let page = reader
+                .get_drops_filtered(0, 2_000, &filters, offset, 100)
+                .unwrap();
+            assert_eq!(page.len(), expected);
+            assert!(page.iter().all(|drop| drop.items.len() == 4));
+            ids.extend(page.iter().map(|drop| drop.id));
+        }
+        assert_eq!(ids, (1..=224).rev().map(|n| n * 401).collect::<Vec<_>>());
+        assert!(reader
+            .get_drops_filtered(0, 2_000, &filters, 224, 100)
+            .unwrap()
+            .is_empty());
+        println!(
+            "Synthetic loot DB: {:.2} MiB, 90,000 bags / 360,000 items; count + 4 filtered pages: {:?}",
+            std::fs::metadata(&path).unwrap().len() as f64 / 1_048_576.0,
+            started.elapsed()
+        );
+        let (predicate, params) = LootDatabase::drop_filter_sql(0, 2_000, &filters);
+        let plan: Vec<String> = reader.conn
+            .prepare(&format!("EXPLAIN QUERY PLAN SELECT d.* FROM loot_drops d WHERE {predicate} ORDER BY d.timestamp DESC, d.id DESC LIMIT 100"))
+            .unwrap()
+            .query_map(rusqlite::params_from_iter(params), |row| row.get(3))
+            .unwrap()
+            .collect::<SqlResult<_>>().unwrap();
+        assert!(
+            plan.iter().any(|step| step.contains("idx_items_drop_id")),
+            "{plan:?}"
+        );
     }
 
     #[test]
@@ -5677,7 +6327,7 @@ mod tests {
             vec![(5139, "Freezing Quiver")],
         );
 
-        db.migrate(14).unwrap();
+        assert_legacy_migration(&mut db, 14);
 
         let drops = db.get_recent_drops(10).unwrap();
         let f = |id: i64| drops.iter().find(|d| d.id == id).unwrap();
@@ -5723,7 +6373,7 @@ mod tests {
             vec![(5139, "Freezing Quiver")],
         );
 
-        db.migrate(14).unwrap();
+        assert_legacy_migration(&mut db, 14);
 
         let drops = db.get_recent_drops(10).unwrap();
         let f = |id: i64| drops.iter().find(|d| d.id == id).unwrap();
@@ -5753,7 +6403,7 @@ mod tests {
             vec![(32722, "Enchanted Ice Shard")],
         );
 
-        db.migrate(14).unwrap();
+        assert_legacy_migration(&mut db, 14);
 
         let drops = db.get_recent_drops(10).unwrap();
         let f = |id: i64| drops.iter().find(|d| d.id == id).unwrap();
@@ -5776,7 +6426,7 @@ mod tests {
             vec![(5139, "Freezing Quiver")],
         );
 
-        db.migrate(15).unwrap();
+        assert_legacy_migration(&mut db, 15);
 
         let drops = db.get_recent_drops(10).unwrap();
         let f = |id: i64| drops.iter().find(|d| d.id == id).unwrap();

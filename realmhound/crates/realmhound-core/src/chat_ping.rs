@@ -6,9 +6,15 @@
 //! user configured appears. Both match whole words only, so a trigger of `abyss`
 //! never fires on `abyssal`.
 
-/// Longest trigger text accepted for the custom chat ping. The settings field
-/// enforces the same cap, so a stored value can never exceed it.
+/// Longest trigger text accepted for one custom-chat variant. The settings
+/// field enforces the same cap, so a stored variant can never exceed it.
 pub const CUSTOM_CHAT_TEXT_MAX: usize = 50;
+
+/// Longest comma-separated trigger field accepted for one custom-chat alert.
+pub const CUSTOM_CHAT_TEXT_TOTAL_MAX: usize = 2000;
+
+/// Maximum number of custom-chat alerts a user can configure.
+pub const CUSTOM_CHAT_ALERTS_MAX: usize = 20;
 
 /// Whether `c` can be part of a word for trigger matching. Everything else
 /// (spaces, punctuation, quotes) counts as a boundary, so `Bob's` mentions
@@ -26,11 +32,53 @@ pub fn contains_word(text: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return false;
     }
-    let haystack = text.to_lowercase();
-    let needle = needle.to_lowercase();
+    NormalizedChatBody::new(text).contains_word(needle)
+}
 
+/// A message body lowercased once, so every trigger checked against the same
+/// message reuses the normalized text instead of allocating a fresh copy.
+#[derive(Debug, Clone)]
+pub struct NormalizedChatBody(String);
+
+impl NormalizedChatBody {
+    /// Normalize a message body for matching.
+    pub fn new(body: &str) -> Self {
+        Self(body.to_lowercase())
+    }
+
+    /// True if the body contains `needle` as a whole word,
+    /// ASCII-case-insensitively. Same semantics as [`contains_word`].
+    pub fn contains_word(&self, needle: &str) -> bool {
+        let needle = needle.trim();
+        if needle.is_empty() {
+            return false;
+        }
+        contains_word_normalized(&self.0, &needle.to_lowercase())
+    }
+
+    /// True if the body contains any variant in a comma-separated trigger field
+    /// as a whole word.
+    pub fn matches_any_trigger(&self, words: &str) -> bool {
+        split_trigger_words(words).any(|word| self.contains_word(word))
+    }
+
+    /// Extra pings for this normalized message. `body` is the original text, used
+    /// only for the presence-notice check.
+    pub fn pings_for(&self, body: &str, ign: Option<&str>, trigger: &str) -> ChatPings {
+        ChatPings {
+            // A guild presence notice names the member without anyone mentioning
+            // them, so it never raises the character-name ping.
+            ign_mention: !is_presence_notice(body)
+                && ign.is_some_and(|name| self.contains_word(name)),
+            custom_chat: self.contains_word(trigger),
+        }
+    }
+}
+
+/// Whole-word search over an already-lowercased haystack and needle.
+fn contains_word_normalized(haystack: &str, needle: &str) -> bool {
     let mut searched = 0;
-    while let Some(offset) = haystack[searched..].find(&needle) {
+    while let Some(offset) = haystack[searched..].find(needle) {
         let start = searched + offset;
         let end = start + needle.len();
         let before_is_boundary = haystack[..start]
@@ -50,6 +98,52 @@ pub fn contains_word(text: &str, needle: &str) -> bool {
         searched = start + haystack[start..].chars().next().map_or(1, char::len_utf8);
     }
     false
+}
+
+/// Split a comma-separated trigger field into its non-empty variants.
+pub fn split_trigger_words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| c == ',' || c == '\n' || c == '\r')
+        .map(str::trim)
+        .filter(|word| !word.is_empty())
+}
+
+/// True if `body` contains any variant in a comma-separated trigger field as a
+/// whole word.
+pub fn matches_any_trigger(body: &str, words: &str) -> bool {
+    NormalizedChatBody::new(body).matches_any_trigger(words)
+}
+
+/// Normalise a comma-separated trigger field: trim variants, cap each at
+/// [`CUSTOM_CHAT_TEXT_MAX`] characters, remove case-insensitive duplicates, and
+/// keep the joined field within [`CUSTOM_CHAT_TEXT_TOTAL_MAX`] characters.
+pub fn normalize_trigger_words(text: &str) -> String {
+    let mut seen: Vec<String> = Vec::new();
+    let mut words: Vec<String> = Vec::new();
+    let mut used = 0usize;
+
+    for raw in text.split(|c: char| c == ',' || c == '\n' || c == '\r') {
+        let word: String = raw
+            .trim()
+            .chars()
+            .take(CUSTOM_CHAT_TEXT_MAX)
+            .collect::<String>();
+        if word.is_empty() {
+            continue;
+        }
+        let key = word.to_lowercase();
+        if seen.iter().any(|existing| existing == &key) {
+            continue;
+        }
+        let added = word.chars().count() + if words.is_empty() { 0 } else { 2 };
+        if used + added > CUSTOM_CHAT_TEXT_TOTAL_MAX {
+            break;
+        }
+        used += added;
+        seen.push(key);
+        words.push(word);
+    }
+
+    words.join(", ")
 }
 
 /// Which extra chat pings a message body matches. Pure text matching: callers
@@ -90,12 +184,7 @@ impl ChatPings {
 /// triggers a mention by itself. `ign` is the local character name; `trigger` is
 /// the configured custom chat text.
 pub fn pings_for(body: &str, ign: Option<&str>, trigger: &str) -> ChatPings {
-    ChatPings {
-        // A guild presence notice names the member without anyone mentioning
-        // them, so it never raises the character-name ping.
-        ign_mention: !is_presence_notice(body) && ign.is_some_and(|name| contains_word(body, name)),
-        custom_chat: contains_word(body, trigger),
-    }
+    NormalizedChatBody::new(body).pings_for(body, ign, trigger)
 }
 
 #[cfg(test)]
@@ -215,5 +304,40 @@ mod tests {
         assert!(!is_presence_notice(""));
         let pings = pings_for("did Bob come online?", Some("Bob"), "");
         assert!(pings.ign_mention);
+    }
+
+    #[test]
+    fn matches_any_comma_separated_trigger_variant() {
+        assert!(matches_any_trigger("wanna do abyss?", "abyss, abby, aby"));
+        assert!(matches_any_trigger("abby run?", "abyss, abby, aby"));
+        assert!(matches_any_trigger("aby now", "abyss, abby, aby"));
+        assert!(!matches_any_trigger("nothing here", "abyss, abby, aby"));
+        assert!(!matches_any_trigger("abyssal", "abyss, abby, aby"));
+    }
+
+    #[test]
+    fn normalize_trigger_words_trims_caps_and_deduplicates() {
+        assert_eq!(
+            normalize_trigger_words(" abyss,  ABYSS ,abby,,aby "),
+            "abyss, abby, aby"
+        );
+        assert_eq!(
+            normalize_trigger_words("abyss\nabby\r\naby"),
+            "abyss, abby, aby"
+        );
+        let long = "x".repeat(CUSTOM_CHAT_TEXT_MAX + 20);
+        assert_eq!(
+            normalize_trigger_words(&long).chars().count(),
+            CUSTOM_CHAT_TEXT_MAX
+        );
+    }
+
+    #[test]
+    fn normalize_trigger_words_respects_the_total_field_cap() {
+        let words = (0..100)
+            .map(|i| format!("word{i:03}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert!(normalize_trigger_words(&words).chars().count() <= CUSTOM_CHAT_TEXT_TOTAL_MAX);
     }
 }

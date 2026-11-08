@@ -28,6 +28,9 @@ use realmhound_core::{
 
 use crate::panels::loot::DateFilter;
 use crate::panels::{empty_state, empty_state_lines, AppAction, Panel, PanelContext};
+use crate::rendering::modifier_chips::{
+    self, DIMITUS_OBJECT_ID, WHITE_BAG_OBJECT_ID, XP_BOOSTER_OBJECT_ID,
+};
 use crate::rendering::EmbeddedIcon;
 
 /// How often to poll the fight count for new fights (wall clock).
@@ -44,20 +47,6 @@ const CARD_HEIGHT: f32 = 52.0;
 /// damage column. The Messenger aux representative (45365) is
 /// excluded since guard damage is only tracked on the main O3 body.
 const O3_BOSS_TYPE: i32 = 45363;
-
-/// Boss starting HP a fight's damage shares reconcile against, or 0 when the HP
-/// is not a real damage pool. Moonlight Village mechanics bosses floor
-/// invulnerable and are cleared by the run's own completion instead of a death,
-/// so their nominal max HP is never removed; a 0 pool makes the participant
-/// table show each player's raw share of the tracked total rather than a
-/// fraction of that fake pool (and suppresses the "Unattributed" HP-gap row).
-fn share_hp_pool(boss_object_type: i32, boss_start_hp: i32) -> i64 {
-    if is_mv_boss(boss_object_type) {
-        0
-    } else {
-        boss_start_hp as i64
-    }
-}
 
 /// The overlaid text on a boss HP bar. An uncapped boss (Moonlight Village
 /// mechanics boss) has no finite pool, so it reads `<party damage> / ∞`;
@@ -632,6 +621,110 @@ fn merge_run_abilities(enc: &EncounterRecord) -> Vec<AbilityActivation> {
     }
     out.sort_by_key(|a| a.start_offset_ms);
     out
+}
+
+/// Draw the dungeon-modifier rows shown directly under a fight card's
+/// `Dungeon · Date time` line: the modifier chips first, then the total
+/// Loot/Dust/XP bonuses they grant. Both rows are omitted when the instance
+/// recorded no mods (realms, hubs, unmodified dungeons, pre-tracking cards).
+fn draw_dungeon_mod_rows(
+    ui: &mut egui::Ui,
+    sprite_renderer: &mut crate::rendering::SpriteRenderer,
+    tokens: &[String],
+) {
+    if tokens.is_empty() {
+        return;
+    }
+    let chips = modifier_chips::chips_from_tokens(tokens);
+    let text_color = Color32::GRAY;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        for (idx, chip) in chips.iter().enumerate() {
+            if idx > 0 {
+                ui.label(RichText::new(",").color(text_color));
+            }
+            let chip_response = ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                let icon_size = egui::vec2(20.0, 20.0);
+                if chip.is_dimitus {
+                    let (rect, _) = ui.allocate_exact_size(icon_size, egui::Sense::hover());
+                    sprite_renderer.draw_outlined_sprite_in_rect(ui, DIMITUS_OBJECT_ID, rect);
+                } else if let Some(icon) = chip.modifier_icon {
+                    let (rect, _) = ui.allocate_exact_size(icon_size, egui::Sense::hover());
+                    sprite_renderer.draw_modifier_icon(ui, icon, rect);
+                } else if let Some(icon) = modifier_chips::mod_type_icon(chip.mod_type) {
+                    let (rect, _) = ui.allocate_exact_size(icon_size, egui::Sense::hover());
+                    sprite_renderer.draw_embedded_icon(ui, icon, rect);
+                } else if let Some(glyph) = modifier_chips::mod_type_glyph(chip.mod_type) {
+                    ui.label(RichText::new(glyph).color(text_color));
+                }
+                ui.label(RichText::new(&chip.name).color(text_color));
+            });
+            if chip_response.response.hovered() {
+                if let Some(tooltip) = modifier_tooltip(&chip.token) {
+                    chip_response.response.hover_tip(tooltip);
+                }
+            }
+        }
+    });
+
+    let bonus = realmhound_core::dungeon_modifiers::total_bonus(tokens);
+    if bonus.loot <= 0 && bonus.dust <= 0 && bonus.xp <= 0 {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 12.0;
+        if bonus.loot > 0 {
+            draw_reward_icon(ui, sprite_renderer, None, WHITE_BAG_OBJECT_ID);
+            ui.label(RichText::new(format!("Loot +{}%", bonus.loot)).color(text_color));
+        }
+        if bonus.dust > 0 {
+            draw_reward_icon(ui, sprite_renderer, Some(EmbeddedIcon::DustGrey), -1);
+            ui.label(RichText::new(format!("Dust +{}%", bonus.dust)).color(text_color));
+        }
+        if bonus.xp > 0 {
+            draw_reward_icon(ui, sprite_renderer, None, XP_BOOSTER_OBJECT_ID);
+            ui.label(RichText::new(format!("XP +{}%", bonus.xp)).color(text_color));
+        }
+    });
+}
+
+/// Draw one reward icon (white bag, grey dust, or XP booster) at chip size.
+fn draw_reward_icon(
+    ui: &mut egui::Ui,
+    sprite_renderer: &mut crate::rendering::SpriteRenderer,
+    embedded: Option<EmbeddedIcon>,
+    object_id: i32,
+) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
+    match embedded {
+        Some(icon) => {
+            sprite_renderer.draw_embedded_icon(ui, icon, rect);
+        }
+        None => {
+            sprite_renderer.draw_outlined_sprite_in_rect(ui, object_id, rect);
+        }
+    }
+}
+
+/// Hover text for a modifier: its in-game description plus reward bonuses,
+/// resolved from the locally extracted `mods.xml`. `None` when nothing is known.
+fn modifier_tooltip(token: &str) -> Option<String> {
+    let def = get_asset_manager().modifier_def(token)?;
+    let mut lines = Vec::new();
+    let description = def.description.trim();
+    if !description.is_empty() {
+        lines.push(description.to_string());
+    }
+    let bonuses: Vec<String> = [(def.loot, "Loot"), (def.dust, "Dust"), (def.xp, "XP")]
+        .into_iter()
+        .filter(|(value, _)| *value > 0)
+        .map(|(value, label)| format!("{label} +{value}%"))
+        .collect();
+    if !bonuses.is_empty() {
+        lines.push(bonuses.join(" · "));
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 fn dungeon_display_name(portal_map: &DungeonPortalMap, dungeon: &str, modes: RunModes) -> String {
@@ -1367,7 +1460,7 @@ fn fmt_duration(ms: i64) -> String {
 fn render_count_pill(ui: &mut egui::Ui, count: i64) -> bool {
     const H: f32 = 20.0;
     const LEFT_PAD: f32 = 6.0;
-    const GAP: f32 = 6.0; // text -> ✕
+    const GAP: f32 = 6.0; // text -> ×
     const X_W: f32 = 10.0;
     const RIGHT_PAD: f32 = 6.0;
 
@@ -1409,7 +1502,7 @@ fn render_count_pill(ui: &mut egui::Ui, count: i64) -> bool {
     ui.painter().text(
         x_center,
         egui::Align2::CENTER_CENTER,
-        "\u{2715}",
+        "\u{00d7}",
         font,
         x_color,
     );
@@ -1798,7 +1891,7 @@ impl CombatHistoryPanel {
                 let enter_pressed =
                     resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
-                if !self.search.is_empty() && shadcn.btn(ui, "✕").clicked() {
+                if !self.search.is_empty() && shadcn.btn(ui, "×").clicked() {
                     self.search.clear();
                     self.search_popup_open = false;
                     self.search_selected_index = None;
@@ -3066,6 +3159,7 @@ impl CombatHistoryPanel {
                         ))
                         .color(Color32::GRAY),
                     );
+                    draw_dungeon_mod_rows(ui, ctx.sprite_renderer, &fight.dungeon_modifiers);
                     ui.label(
                         RichText::new(format!("Duration: {}", fmt_duration(fight.duration_ms())))
                             .color(Color32::GRAY),
@@ -3179,8 +3273,6 @@ impl CombatHistoryPanel {
                 ctx,
                 &fight.participants,
                 "combat_detail_table",
-                share_hp_pool(fight.boss_object_type, fight.boss_start_hp),
-                fight.killed,
                 !fight.killed,
                 fight.boss_object_type == O3_BOSS_TYPE,
                 &mut player_click,
@@ -3620,10 +3712,31 @@ impl CombatHistoryPanel {
                 }
                 ui.end_row();
                 for w in &local.weapons {
+                    // The rows below this one are disjoint shares of the weapon's
+                    // hits (enchant patterns and other items' weapon-shot procs),
+                    // so the weapon's own row is the remainder -- that is what
+                    // makes "native shots" and "shots added by the enchant"
+                    // add up to the total with no overlap. When an enchant
+                    // *replaces* the weapon's patterns (a SetSubAttack), the
+                    // remainder is zero and only the enchant row is shown.
+                    let sub_hits: u64 = w.patterns.iter().map(|p| p.hits).sum::<u64>()
+                        + w.item_procs.iter().map(|p| p.hits).sum::<u64>();
+                    let sub_damage: i64 = w.patterns.iter().map(|p| p.damage.max(0)).sum::<i64>()
+                        + w.item_procs.iter().map(|p| p.damage.max(0)).sum::<i64>();
+                    let native_hits = w.hits.saturating_sub(sub_hits);
+                    // With no native hits there is no native damage either; any
+                    // leftover is rounding from scaling the sub-rows.
+                    let native_damage = if native_hits == 0 {
+                        0
+                    } else {
+                        (w.damage.max(0) - sub_damage).max(0)
+                    };
                     // The item's own cell, enchant gems and tooltip included, the
                     // way the character page's weapon line draws it: the gems show
                     // which enchantments were on it, and hovering anywhere on the
-                    // cell opens the same tooltip the big gear icons use.
+                    // cell opens the same tooltip the big gear icons use. Shown even
+                    // when every shot came from an enchant, so the weapon always
+                    // heads its group.
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         let ench: Vec<i32> = w.enchants.iter().map(|&e| e as i32).collect();
@@ -3635,15 +3748,175 @@ impl CombatHistoryPanel {
                         );
                         ui.label(item_name(w.weapon_id));
                     });
-                    ui.label(w.hits.to_string());
-                    let avg = if w.hits > 0 {
-                        format!("{:.1}", w.damage.max(0) as f64 / w.hits as f64)
+                    ui.label(native_hits.to_string());
+                    let avg = if native_hits > 0 {
+                        format!("{:.1}", native_damage as f64 / native_hits as f64)
                     } else {
                         "-".to_string()
                     };
                     ui.label(avg);
-                    ui.label(RichText::new(w.damage.max(0).to_string()).strong());
+                    ui.label(RichText::new(native_damage.to_string()).strong());
                     ui.end_row();
+
+                    // Extra firing patterns this weapon used (an enchantment's
+                    // sub-attack, or any other added pattern), shown beneath it
+                    // with their own hits and value. A subset of the row above,
+                    // never extra damage. The default pattern stays in the weapon
+                    // row and is not repeated.
+                    let default_pid = if w.patterns.iter().any(|p| p.projectile_id == -1) {
+                        -1
+                    } else {
+                        w.patterns
+                            .iter()
+                            .max_by_key(|p| p.hits)
+                            .map(|p| p.projectile_id)
+                            .unwrap_or(0)
+                    };
+                    for p in &w.patterns {
+                        if p.enchant_id.is_none() && p.projectile_id == default_pid {
+                            continue;
+                        }
+                        ui.horizontal(|ui| {
+                            ui.add_space(16.0);
+                            let label = match p.enchant_id {
+                                Some(enchant_id) => {
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(16.0, 16.0),
+                                        egui::Sense::hover(),
+                                    );
+                                    ctx.sprite_renderer
+                                        .draw_enchant_sprite_in_rect(ui, enchant_id, rect);
+                                    let name = get_asset_manager()
+                                        .enchant_name(enchant_id)
+                                        .unwrap_or_else(|| format!("Enchant 0x{enchant_id:X}"));
+                                    // An enchant that supplies several patterns gets
+                                    // one row each (the wider 2-projectile swing and
+                                    // the narrower extra shot); number them so the
+                                    // rows are distinguishable.
+                                    let same_enchant = w
+                                        .patterns
+                                        .iter()
+                                        .filter(|q| q.enchant_id == Some(enchant_id))
+                                        .count();
+                                    if same_enchant > 1 {
+                                        let pid = p.projectile_id;
+                                        let which = if pid < 0 {
+                                            "default".to_string()
+                                        } else {
+                                            pid.to_string()
+                                        };
+                                        format!("{name} (pattern {which})")
+                                    } else {
+                                        name
+                                    }
+                                }
+                                None => {
+                                    let pid = p.projectile_id;
+                                    if pid < 0 {
+                                        "Sub-attack".to_string()
+                                    } else {
+                                        format!("Sub-attack {pid}")
+                                    }
+                                }
+                            };
+                            ui.label(RichText::new(label).italics()).on_hover_text(
+                                "Shots fired with this additional firing pattern, listed \
+                                 separately from the weapon's own shots so the two rows never \
+                                 overlap. An enchantment that replaces the weapon's pattern \
+                                 takes the whole row (the weapon line is then hidden).",
+                            );
+                        });
+                        ui.label(p.hits.to_string());
+                        let avg = if p.hits > 0 {
+                            format!("{:.1}", p.damage.max(0) as f64 / p.hits as f64)
+                        } else {
+                            "-".to_string()
+                        };
+                        ui.label(avg);
+                        ui.label(RichText::new(p.damage.max(0).to_string()).strong());
+                        ui.end_row();
+                    }
+
+                    // Lethal Strike's share of this weapon's damage (the cloak's
+                    // per-hit bonus plus its two simulated side procs), shown on
+                    // its own line so the cloak's contribution is visible while
+                    // staying inside the weapon's total.
+                    if !w.ls.is_empty() {
+                        for ls in &w.ls {
+                            ui.horizontal(|ui| {
+                                ui.add_space(16.0);
+                                if ls.item_id > 0 {
+                                    ctx.sprite_renderer.render_item_sprite_with_enchants_native(
+                                        ui,
+                                        ls.item_id,
+                                        &[],
+                                        16.0,
+                                    );
+                                }
+                                let cloak_name = if ls.item_id > 0 {
+                                    ctx.sprite_renderer
+                                        .item_name(ls.item_id)
+                                        .unwrap_or_else(|| item_name(ls.item_id))
+                                } else {
+                                    String::new()
+                                };
+                                let label = if cloak_name.is_empty() {
+                                    "Lethal Strike".to_string()
+                                } else {
+                                    format!("Lethal Strike - {cloak_name}")
+                                };
+                                ui.label(RichText::new(label).italics()).on_hover_text(
+                                    "Damage this cloak's Lethal Strike added on top of these \
+                                     hits: the per-hit bonus, plus the two side procs the game \
+                                     fires without packets (those are simulated from the \
+                                     cloak's params and your WIS). A subset of the weapon row \
+                                     above.",
+                                );
+                            });
+                            ui.label(ls.hits.to_string());
+                            let avg = if ls.hits > 0 {
+                                format!("{:.1}", ls.damage.max(0) as f64 / ls.hits as f64)
+                            } else {
+                                "-".to_string()
+                            };
+                            ui.label(avg);
+                            ui.label(RichText::new(ls.damage.max(0).to_string()).strong());
+                            ui.end_row();
+                        }
+                    }
+
+                    // Weapon-shot procs from other equipped items (Holy Barrage),
+                    // which fire alongside the weapon but belong to their own
+                    // item. Shown with that item's icon, inside the weapon total.
+                    for proc in &w.item_procs {
+                        ui.horizontal(|ui| {
+                            ui.add_space(16.0);
+                            ctx.sprite_renderer.render_item_sprite_with_enchants_native(
+                                ui,
+                                proc.item_id,
+                                &[],
+                                16.0,
+                            );
+                            let name = ctx
+                                .sprite_renderer
+                                .item_name(proc.item_id)
+                                .unwrap_or_else(|| item_name(proc.item_id));
+                            ui.label(RichText::new(name).italics()).on_hover_text(
+                                "Shots this item's weapon-shot proc fired alongside the weapon \
+                                 (for example Holy Barrage), listed separately from the \
+                                 weapon's own shots so the two rows never overlap.",
+                            );
+                        });
+                        ui.label(proc.hits.to_string());
+                        let avg = if proc.hits > 0 {
+                            format!("{:.1}", proc.damage.max(0) as f64 / proc.hits as f64)
+                        } else {
+                            "-".to_string()
+                        };
+                        ui.label(avg);
+                        ui.label(RichText::new(proc.damage.max(0).to_string()).strong());
+                        ui.end_row();
+                    }
                 }
             });
     }
@@ -3781,6 +4054,7 @@ impl CombatHistoryPanel {
             ended_at: enc.ended_at,
             dungeon: enc.dungeon.clone(),
             dungeon_entered_at: anchor.dungeon_entered_at,
+            dungeon_modifiers: anchor.dungeon_modifiers.clone(),
             map_seed: anchor.map_seed,
             boss_object_type: enc.anchor_object_type,
             boss_name: enc.display_name.clone(),
@@ -4445,7 +4719,9 @@ impl CombatHistoryPanel {
              mechanic -- so its HP is effectively infinite. The number shown is \
              the total damage dealt by the party."
         } else {
-            "Boss's HP at the start of the fight / Boss's max HP registered during the fight"
+            "Boss's HP when the fight was registered / the max HP adopted for the \
+             fight. The max follows pre-damage rescaling (e.g. player-count \
+             scaling); once real damage lands the pool is frozen."
         });
 
         bar_inset
@@ -4459,25 +4735,16 @@ impl CombatHistoryPanel {
         ctx: &mut PanelContext,
         participants: &[ParticipantRecord],
         salt: &str,
-        boss_hp: i64,
-        killed: bool,
         local_escaped: bool,
         show_guarded: bool,
         player_click: &mut Option<(String, i32, u32, u32)>,
     ) -> f32 {
         let attributed: i64 = participants.iter().map(|p| p.damage).sum();
-        // On a kill the core capped every participant so their damage sums to
-        // the boss HP that was removed; the residual is damage we saw the boss
-        // lose but couldn't attribute to an observed player. Reconciling lets
-        // the table's Total row equal the boss HP (proving nothing is "lowered",
-        // just overkill excluded). Off a kill we keep the plain tracked total.
-        let reconcile = killed && boss_hp > 0;
-        let unattributed = if reconcile {
-            (boss_hp - attributed).max(0)
-        } else {
-            0
-        };
-        let grand_total = attributed + unattributed;
+        // Shares are taken against the damage we tracked, never against boss HP.
+        // Boss HP is not a reliable damage denominator: it rescales with the
+        // player count and it can be healed, reset, or gated by the encounter.
+        // Reconciling to it would invent "damage" nobody dealt -- for example,
+        // HP the game removes when players leave and the boss downscales.
         let total_hits: i64 = participants.iter().map(|p| p.hits).sum();
         let total_taken: Option<i64> = {
             let vals: Vec<i64> = participants.iter().filter_map(|p| p.damage_taken).collect();
@@ -4527,8 +4794,8 @@ impl CombatHistoryPanel {
         } else {
             None
         };
-        // Denominator for the "%" column: boss HP on a kill, else tracked total.
-        let pct_base = if reconcile { grand_total } else { attributed };
+        // Denominator for the "%" column: the tracked total, always.
+        let pct_base = attributed;
         let denom = pct_base.max(1);
 
         let mut col1_x: f32 = ui.min_rect().left();
@@ -4545,22 +4812,14 @@ impl CombatHistoryPanel {
                 col1_x = ui.label(RichText::new("Teammates").strong()).rect.left();
                 if self.show_dmg {
                     ui.label(RichText::new("Raw DMG").strong());
-                    let (pct_header, pct_hover) = if reconcile {
-                        (
-                            "% of boss HP",
-                            "Share of the boss's starting HP. Players plus \
-                             Unattributed sum to 100% because damage is capped \
-                             at boss HP (overkill excluded).",
-                        )
-                    } else {
-                        (
-                            "% of tracked dmg",
+                    ui.label(RichText::new("% of tracked dmg").strong())
+                        .hover_tip(
                             "Share of damage tracked by RealmHound, not absolute \
-                             raid DPS (visibility gaps exist).",
-                        )
-                    };
-                    ui.label(RichText::new(pct_header).strong())
-                        .hover_tip(pct_hover);
+                             raid DPS (visibility gaps exist). Boss HP is not used \
+                             as the denominator because it rescales with the \
+                             player count and can be healed, reset, or gated by \
+                             the fight.",
+                        );
                 }
                 if self.show_hits {
                     ui.label(RichText::new("Hits landed").strong()).hover_tip(
@@ -4935,58 +5194,22 @@ impl CombatHistoryPanel {
                         .set(bg_idx, egui::Shape::rect_filled(band, 4.0, fill));
                 }
 
-                // Footer: reconcile the damage columns to the boss HP so it's
-                // clear RealmHound caps at HP (excludes overkill) rather than
-                // arbitrarily lowering numbers.
+                // Footer: the total is the tracked damage, never a reconciled
+                // boss-HP figure. Boss HP is not a damage denominator.
                 if self.show_dmg {
-                    if reconcile && unattributed > 0 {
-                        ui.label("");
-                        ui.label(RichText::new("Unattributed").italics().color(Color32::GRAY))
-                            .hover_tip(
-                                "Boss HP that was removed but couldn't be attributed \
-                             to an observed player (out-of-range or untracked \
-                             sources).",
-                            );
-                        ui.label(RichText::new(format!("{}", unattributed)).color(Color32::GRAY));
-                        let pct = (unattributed as f64 / denom as f64) * 100.0;
-                        ui.label(RichText::new(format!("{:.1}%", pct)).color(Color32::GRAY));
-                        if self.show_hits {
-                            ui.label("");
-                        }
-                        if self.show_damage_taken {
-                            ui.label("");
-                        }
-                        if self.show_hits_taken {
-                            ui.label("");
-                        }
-                        if self.show_damage_blocked {
-                            ui.label("");
-                        }
-                        if show_guarded {
-                            ui.label("");
-                        }
-                        ui.label("");
-                        ui.label("");
-                        ui.end_row();
-                    }
-
                     ui.label("");
                     ui.label(RichText::new("Total").strong());
-                    ui.label(RichText::new(format!("{}", grand_total)).strong());
+                    ui.label(RichText::new(format!("{}", attributed)).strong());
                     let pct_label = if pct_base > 0 {
-                        format!("{:.1}%", (grand_total as f64 / denom as f64) * 100.0)
+                        "100.0%".to_string()
                     } else {
                         "-".to_string()
                     };
-                    let total_tip = if reconcile {
-                        "Damage is capped at the boss's HP; overkill beyond its \
-                         HP isn't counted. Players plus Unattributed reconcile to \
-                         the boss's starting HP."
-                    } else {
-                        "Sum of tracked damage across the shown players."
-                    };
-                    ui.label(RichText::new(pct_label).strong())
-                        .hover_tip(total_tip);
+                    ui.label(RichText::new(pct_label).strong()).hover_tip(
+                        "Sum of tracked damage across the shown players. Not \
+                         reconciled to boss HP: rescaling, healing, and damage \
+                         gating make boss HP an unreliable damage denominator.",
+                    );
                     if self.show_hits {
                         ui.label(RichText::new(format!("{}", total_hits)).strong());
                     }
@@ -5283,6 +5506,12 @@ impl CombatHistoryPanel {
                         ))
                         .color(Color32::GRAY),
                     );
+                    let tokens = enc
+                        .phases
+                        .first()
+                        .map(|p| p.dungeon_modifiers.as_slice())
+                        .unwrap_or(&[]);
+                    draw_dungeon_mod_rows(ui, ctx.sprite_renderer, tokens);
                     ui.label(
                         RichText::new(format!(
                             "Active combat time: {}",
@@ -5575,8 +5804,6 @@ impl CombatHistoryPanel {
                         ctx,
                         &phase.participants,
                         &format!("phase_table_{}", phase.id),
-                        share_hp_pool(phase.boss_object_type, phase.boss_start_hp),
-                        phase.killed,
                         // Scope the "you left" nexus marker to escaped *sections*
                         // of an escaped run: a completed mini-boss like Beisa
                         // must not read as nexused just because O3 was escaped,
@@ -5681,7 +5908,7 @@ mod tests {
     use super::{
         assign_drops_exclusive, boost_source_with, boss_bar_label, boss_row_hp_label,
         boss_row_stats_parts, condensed_boosts, dungeon_display_name, fight_ritual_id,
-        share_hp_pool, spirit_total_label, BoostIcon, RunModes, SourceOracle,
+        spirit_total_label, BoostIcon, RunModes, SourceOracle,
     };
     use realmhound_core::assets::get_dungeon_portal_map;
     use realmhound_core::combat::BoostWindow;
@@ -6164,17 +6391,6 @@ mod tests {
             dungeon_display_name(portal_map, "The Shatters", modes(true, true, true)),
             "The Shatters (Leisure, Petless, HM)"
         );
-    }
-
-    #[test]
-    fn mv_bosses_share_against_tracked_total() {
-        // Moonlight Village mechanics bosses have no real HP pool: the share
-        // denominator is 0 so the table uses the tracked total, not the boss HP.
-        for boss in [20450, 20451, 20452, 20493] {
-            assert_eq!(share_hp_pool(boss, 720_000), 0);
-        }
-        // Ordinary bosses keep reconciling against their starting HP.
-        assert_eq!(share_hp_pool(0x10E4, 12_000), 12_000);
     }
 
     #[test]

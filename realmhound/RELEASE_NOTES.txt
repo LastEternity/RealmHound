@@ -1,5 +1,52 @@
-# PPE Discord Bot Integration (v0.0.1)
+# PPE Discord Bot Integration (v0.0.2)
 * Added RotMG PPE Discord Bot HTTP bridge integration (`source: "tomato"` payload compatibility).
 * Added pull-up `🤖 PPE Bot` modal in the top bar with Bridge Review, Bridge Log, and Bot Configuration views.
 * Added automatic ETag-cached CSV sync on app startup from `tseringgg/rotmgppebot` with built-in fallback and manual refresh button (downloading a local CSV is now optional).
 * Updated repository and self-updater targets to `LastEternity/RealmHound`.
+
+# Platform
+* Added Linux (Steam and Proton) support.
+
+# Performance
+* Reduced startup time, optimized Loot/Combat History searching.
+
+# Combat History
+* Fixed healed and phase-gated bosses deflating the whole team's damage through the overkill trim.
+* My Performance card now differentiates weapon native shots, enchantment and other additional projectiles.
+* Fixed enchantment sub-attack and proc projectiles missing from damage attribution.
+* Fixed ability stat scaling not attributed correctly.
+* Fixed ability damage sometimes being credited to the wrong activation.
+* Fixed abilities scaling from MAXHP losing their bonus.
+* Fixed healed bosses under-reporting damage after a mid-fight HP rescale.
+* Fixed solo realm encounters reporting damage above the boss's max HP (e.g. Artificial Sprite God).
+* Fight cards save dungeon mods along with the total Loot, Dust, and XP bonuses they granted.
+
+# Character and Loot
+* Fixed expired loot-boost timers still showing 0:00 on character cards.
+
+# Vault and Treasury
+* Items with empty enchantment slots stored in vault now show their true rarity and owned count correctly.
+
+# Trophy Hall
+* New "Show discovered item rarities" option that shows the highest discovered rarity gems in dungeon's collection (inside dungeon page).
+
+# Missions and Quests
+* Repeatable missions without a "(Repeatable)" title now show their cooldown and return to In Progress correctly.
+* Added new settings for tracking mark progress and quest chests on Seasonal/Regular in Settings -> Taskbar & Quests.
+
+# Chat & message notifications
+* Added filtering by multiple message authors in the Name search.
+* Added up to 20 custom Chat alerts, each with its own trigger words, volume, sound, and group name.
+* Existing single custom Chat triggers migrate automatically into the first alert.
+
+# Live Feed
+* Fixed Totalia the Malevolent not producing a Live Feed entry/notification sound when selected in the settings.
+
+# Settings and Sounds
+* Added category-wide custom sounds for Veteran/Adept/Seasonal realm bosses and both enchantment categories.
+* Entries still using the default sound inherit the category sound; separate entry custom sounds take priority.
+
+# Items and Abilities
+* Fixed Aeonic Talon and other items defined only in the supplemental equipment catalog.
+* Fixed Teratoma and Stoneborn Husk ability data.
+* Fixed supplemental catalogs wiping blueprint and ability mappings.

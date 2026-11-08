@@ -656,7 +656,7 @@ pub const MV_UMI_SPIRIT_TYPE: i32 = 0x513C;
 /// The Moonlight Village loot tier a spirit total earns (4 is the best), or
 /// `None` when no spirits were collected at all.
 ///
-/// RealmEye / issue #30: the dance is scored out of 88 spirits (Tier 4 from 78,
+/// RealmEye data: the dance is scored out of 88 spirits (Tier 4 from 78,
 /// Tier 3 from 58, Tier 2 from 40, Tier 1 from 2), while Kitsune Umi's shorter
 /// fight -- and a Leisurely Mode dance, which shares her thresholds -- is scored
 /// out of 56 (Tier 4 from 48, Tier 3 from 36, Tier 2 from 24, Tier 1 from 2).
@@ -2615,6 +2615,43 @@ pub struct AssetManager {
     last_error: RwLock<Option<String>>,
 }
 
+/// Equipment XML files that define items. `equip_lo.xml` and
+/// `equip_design.xml` are supplemental catalogs for newer items (for example
+/// `HDruidST0`, "Aeonic Talon", and the Heirlooms set) that the game does not
+/// duplicate in `equip.xml`. `equipSubs.xml` holds the sub-attack containers
+/// (`SUBATTACK_CONTAINER`) that enchantments inject into a weapon's firing
+/// pattern; without their `<Subattack>` tables an enchanted shot cannot resolve
+/// its projectile.
+///
+/// Merging only enriches objects already loaded from `ObjectID.list`, so a
+/// catalog can never introduce a phantom object.
+const EQUIPMENT_XML_FILES: &[&str] = &[
+    "equip.xml",
+    "equip_lo.xml",
+    "equip_design.xml",
+    "equipSubs.xml",
+];
+
+/// Merge every available equipment catalog into `list`. Returns the number of
+/// objects enriched. Missing files are skipped so older asset packs still load.
+fn merge_equipment_xml_files(list: &mut ObjectList, assets_dir: &Path) -> usize {
+    let mut merged = 0;
+    for name in EQUIPMENT_XML_FILES {
+        let path = assets_dir.join("xml").join(name);
+        if !path.exists() {
+            continue;
+        }
+        match list.merge_equipment_xml(&path) {
+            Ok(count) => {
+                merged += count;
+                tracing::info!("Merged equipment data for {} items from {:?}", count, path);
+            }
+            Err(e) => tracing::warn!("Failed to merge equipment XML {:?}: {}", path, e),
+        }
+    }
+    merged
+}
+
 impl AssetManager {
     /// Create a new asset manager.
     pub fn new() -> Self {
@@ -2727,22 +2764,18 @@ impl AssetManager {
                     }
                 }
 
-                // Merge equipment XML data (tier, feed_power, fame_bonus, bag_type)
-                let equip_xml_path = assets_dir.join("xml").join("equip.xml");
-                if equip_xml_path.exists() {
-                    match list.merge_equipment_xml(&equip_xml_path) {
-                        Ok(count) => {
-                            tracing::info!(
-                                "Merged equipment data for {} items from {:?}",
-                                count,
-                                equip_xml_path
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to merge equipment XML: {}", e);
-                        }
-                    }
-                }
+                // Merge equipment XML data (tier, feed_power, fame_bonus,
+                // bag_type, subattack tables). The game splits newer items into
+                // `equip_lo.xml`; without it those items have no `<Subattack>`
+                // mapping, and a multi-pattern weapon disables self-compute for
+                // the map on its first non-zero pattern.
+                merge_equipment_xml_files(&mut list, &assets_dir);
+
+                // Index the objects whose HP the game keeps off zero. Their
+                // catalogs are not merged here, so their HP refills used to
+                // be booked as healing (see the method's docs).
+                let aphi = list.index_always_positive_health(&assets_dir.join("xml"));
+                tracing::info!("Indexed {} always-positive-health objects", aphi);
 
                 // Index which items spawn which summoned creatures, so a credited
                 // summon can be traced back to its source (Pocket Rat, Summoner
@@ -3040,6 +3073,24 @@ impl AssetManager {
             .as_ref()
             .map(|list| list.is_ut(id))
             .unwrap_or(false)
+    }
+
+    /// Union of the enabled loot item types, using the same tags as live filtering.
+    pub fn loot_property_item_ids(&self, ut: bool, st: bool, shiny: bool) -> Vec<i32> {
+        self.try_load();
+        let guard = self.objects.read().unwrap();
+        let Some(list) = guard.as_ref() else {
+            return Vec::new();
+        };
+        let mut ids: Vec<i32> = list
+            .iter()
+            .filter(|asset| {
+                (ut && asset.is_ut()) || (st && asset.is_st()) || (shiny && asset.is_shiny())
+            })
+            .map(|asset| asset.id)
+            .collect();
+        ids.sort_unstable();
+        ids
     }
 
     /// Get the forge/tooltip category icon index for an item, normalizing
@@ -3389,6 +3440,21 @@ impl AssetManager {
         is_self_destruct_boss_type(id)
     }
 
+    /// Whether the game keeps this object's HP number off zero and refills it
+    /// (`<AlwaysPositiveHealth />`). Its HP bar is not a record of damage taken,
+    /// so HP that climbs back mid-fight is not healing and must not widen the
+    /// fight's damage pool: the realm's Artificial Sprite God snaps from 12,775
+    /// to its 18,500 maximum without being healed, which used to add 5,725 to the
+    /// pool and let a fight report 24,225 damage against an 18,500 boss.
+    pub fn always_positive_health(&self, id: i32) -> bool {
+        self.try_load();
+        self.objects
+            .read()
+            .unwrap()
+            .as_ref()
+            .map_or(false, |list| list.always_positive_health(id))
+    }
+
     /// Whether `id` is a curated treasure crate ([`TREASURE_CRATE_TYPES`]): a
     /// lootable crate/chest grouped under the "Treasure crates" Combat History
     /// category.
@@ -3654,6 +3720,121 @@ impl AssetManager {
             resolved.max_damage,
             resolved.armor_piercing,
             asset.slot_type,
+        ))
+    }
+
+    /// Resolve a weapon shot's projectile damage, honoring an enchantment that
+    /// replaces or adds a sub-attack slot.
+    ///
+    /// `PlayerShoot.projectileId` is the *sub-attack slot*. `AddSubAttack` /
+    /// `SetSubAttack` enchantments point a slot at a container object that owns
+    /// the real projectile, so an enchanted weapon's slot resolves against that
+    /// container instead of its own `<Projectile>` list. Without this, an
+    /// enchanted Demon Blade's slot 1 has no projectile at all.
+    ///
+    /// Returns `(min_damage, max_damage, armor_piercing, slot_type)` of the
+    /// *weapon*, or `None` when neither the enchantment nor the weapon resolves.
+    pub fn weapon_projectile_with_enchants(
+        &self,
+        id: i32,
+        projectile_id: usize,
+        enchant_ids: &[u16],
+    ) -> Option<(i32, i32, bool, i32, Option<u16>)> {
+        if !enchant_ids.is_empty() {
+            // Copy the target out first: the enchantments and objects locks are
+            // never held together anywhere in this manager.
+            if let Some((enchant_id, container, index)) =
+                self.enchant_sub_attack_target(enchant_ids, projectile_id)
+            {
+                if let Some((min, max, ap)) = self.container_projectile(&container, index) {
+                    let slot_type = self
+                        .objects
+                        .read()
+                        .unwrap()
+                        .as_ref()
+                        .and_then(|list| list.get(id))
+                        .map(|weapon| weapon.slot_type)
+                        .unwrap_or(0);
+                    return Some((min, max, ap, slot_type, Some(enchant_id)));
+                }
+            }
+        }
+        self.weapon_projectile(id, projectile_id)
+            .map(|(min, max, ap, slot_type)| (min, max, ap, slot_type, None))
+    }
+
+    /// Whether an item declares an `OnPlayerShootActivate` proc, i.e. an effect
+    /// that fires alongside every weapon shot rather than on activation.
+    pub fn item_has_on_shoot_proc(&self, id: i32) -> bool {
+        self.try_load();
+        self.objects
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|list| list.has_on_shoot_proc(id))
+            .unwrap_or(false)
+    }
+
+    /// Number of `SetSubAttack` / `AddSubAttack` patterns an enchantment declares.
+    /// Used to tell whether a weapon's extra firing pattern can belong to it.
+    pub fn enchant_sub_attack_count(&self, type_id: u16) -> usize {
+        self.try_load();
+        self.enchantments
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|list| list.sub_attacks(type_id).len())
+            .unwrap_or(0)
+    }
+
+    /// The enchantment, container object and index an enchantment assigns to
+    /// `slot`, from the first equipped enchant that defines it. Copies the target
+    /// so the caller can resolve it without holding the enchantments lock.
+    fn enchant_sub_attack_target(
+        &self,
+        enchant_ids: &[u16],
+        slot: usize,
+    ) -> Option<(u16, String, usize)> {
+        let guard = self.enchantments.read().unwrap();
+        let list = guard.as_ref()?;
+        for &id in enchant_ids {
+            if let Some(entry) = list
+                .sub_attacks(id)
+                .iter()
+                .find(|entry| entry.slot == slot as i32)
+            {
+                return Some((
+                    id,
+                    entry.container.clone(),
+                    entry.container_index.max(0) as usize,
+                ));
+            }
+        }
+        None
+    }
+
+    /// A sub-attack container's projectile `(min, max, armor_piercing)`.
+    ///
+    /// The element text names the container entry, which is a projectile index
+    /// in every catalog observed so far; some containers instead expose the
+    /// index through their `<Subattack>` table, and a container with a single
+    /// entry can only mean 0, so those are tried in turn.
+    fn container_projectile(&self, container: &str, index: usize) -> Option<(i32, i32, bool)> {
+        self.try_load();
+        let guard = self.objects.read().unwrap();
+        let list = guard.as_ref()?;
+        let asset = list.get_by_name(container)?;
+        let resolvable = |i: usize| asset.projectiles.get(i);
+        let projectile = resolvable(index)
+            .or_else(|| {
+                list.subattack_projectile_index(asset.id, index)
+                    .and_then(resolvable)
+            })
+            .or_else(|| (asset.projectiles.len() == 1).then(|| &asset.projectiles[0]))?;
+        Some((
+            projectile.min_damage,
+            projectile.max_damage,
+            projectile.armor_piercing,
         ))
     }
 
@@ -4698,6 +4879,10 @@ pub struct AssetStats {
 
 /// Get the default assets directory.
 pub fn default_assets_dir() -> PathBuf {
+    #[cfg(target_os = "linux")]
+    if let Some(data) = dirs::data_local_dir() {
+        return data.join("RealmHound").join("assets");
+    }
     // Prefer LocalAppData on Windows
     #[cfg(target_os = "windows")]
     {
@@ -4725,6 +4910,10 @@ pub fn default_asset_dirs() -> Vec<PathBuf> {
 
     // Current working directory
     dirs.push(PathBuf::from("assets"));
+    #[cfg(target_os = "linux")]
+    if let Some(data) = dirs::data_local_dir() {
+        dirs.push(data.join("RealmHound").join("assets"));
+    }
 
     // Executable directory
     if let Ok(exe_path) = std::env::current_exe() {
@@ -4787,6 +4976,164 @@ pub fn find_assets_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn extracted_assets_use_xdg_data_directory() {
+        let expected = dirs::data_local_dir().unwrap().join("RealmHound/assets");
+        assert_eq!(default_assets_dir(), expected);
+        assert!(default_asset_dirs().contains(&expected));
+    }
+
+    #[test]
+    fn enchant_sub_attack_resolves_the_container_projectile() {
+        // Demon Blade + Hellfire Edge: the enchant replaces slot 0 and adds slot
+        // 1, both sourced from the "Hellfire Edge Enchantment Proc" container
+        // (105-125). Without the enchant the weapon's own 150-175 projectile is
+        // used and slot 1 does not exist at all.
+        let dir = std::env::temp_dir().join(format!("rh_subattack_test_{}", std::process::id()));
+        let xml_dir = dir.join("xml");
+        std::fs::create_dir_all(&xml_dir).unwrap();
+        std::fs::write(
+            dir.join("ObjectID.list"),
+            concat!(
+                "3073;;Equipment;;150:175:0;abyssOfDemonsObjects8x8:1;EQUIPMENT,WEAPON,SWORD;Demon Blade;;;;1;0;1\n",
+                "12150;;Equipment;;105:125:0,105:125:0;abyssOfDemonsObjects8x8:1;SUBATTACK_CONTAINER;Hellfire Edge Enchantment Proc;;;;1;0;1\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            xml_dir.join("equipSubs.xml"),
+            r#"<Objects>
+  <Object id="Hellfire Edge Enchantment Proc" type="0x2F76">
+    <Class>Equipment</Class>
+    <Projectile id="0"><MinDamage>105</MinDamage><MaxDamage>125</MaxDamage></Projectile>
+    <Subattack index="0" projectileId="0"><NumProjectiles>2</NumProjectiles></Subattack>
+    <Projectile id="1"><MinDamage>105</MinDamage><MaxDamage>125</MaxDamage></Projectile>
+    <Subattack index="1" projectileId="1"><NumProjectiles>1</NumProjectiles></Subattack>
+    <Labels>SUBATTACK_CONTAINER</Labels>
+  </Object>
+</Objects>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            xml_dir.join("enchantments.xml"),
+            r#"<Enchantments>
+  <Enchantment id="AWAKENED_DEMON_BLADE" type="0x4008">
+    <DisplayId>Hellfire Edge</DisplayId>
+    <Mutators>
+      <SetSubAttack subAttackIndex="0" subAttackObject="Hellfire Edge Enchantment Proc">0</SetSubAttack>
+      <AddSubAttack subAttackIndex="1" subAttackObject="Hellfire Edge Enchantment Proc">1</AddSubAttack>
+    </Mutators>
+  </Enchantment>
+</Enchantments>"#,
+        )
+        .unwrap();
+
+        let mut list = ObjectList::load_from_file(dir.join("ObjectID.list")).unwrap();
+        merge_equipment_xml_files(&mut list, &dir);
+
+        let manager = AssetManager::new();
+        manager.set_assets_dir(&dir);
+        *manager.objects.write().unwrap() = Some(list);
+        *manager.enchantments.write().unwrap() =
+            Some(EnchantmentList::load_from_file(&xml_dir.join("enchantments.xml")).unwrap());
+
+        // Unenchanted: slot 0 uses the weapon's own projectile, slot 1 is gone.
+        assert_eq!(
+            manager.weapon_projectile_with_enchants(3073, 0, &[]),
+            Some((150, 175, false, 1, None))
+        );
+        assert_eq!(manager.weapon_projectile_with_enchants(3073, 1, &[]), None);
+
+        // Hellfire Edge: both slots resolve to the container's 105-125, credited
+        // to the enchant that supplied them.
+        let hellfire = [0x4008u16];
+        assert_eq!(
+            manager.weapon_projectile_with_enchants(3073, 0, &hellfire),
+            Some((105, 125, false, 1, Some(0x4008)))
+        );
+        assert_eq!(
+            manager.weapon_projectile_with_enchants(3073, 1, &hellfire),
+            Some((105, 125, false, 1, Some(0x4008))),
+            "an added sub-attack slot resolves through the container"
+        );
+        // An unknown enchant id leaves the weapon's own resolution in place.
+        assert_eq!(
+            manager.weapon_projectile_with_enchants(3073, 0, &[0x9999]),
+            Some((150, 175, false, 1, None))
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn loads_supplemental_equipment_catalogs() {
+        // Aeonic Talon (HDruidST0, 0xF98C) is defined only in equip_lo.xml.
+        // Its five firing patterns all use projectile 0; without the subattack
+        // table the first non-zero pattern disables self-compute for the map.
+        // Teratoma (0xBEFA) is defined only in equip_design.xml; without that
+        // file its DetonateHex ability has no self-computed damage.
+        let dir = std::env::temp_dir().join(format!("rh_equip_extra_test_{}", std::process::id()));
+        let xml_dir = dir.join("xml");
+        std::fs::create_dir_all(&xml_dir).unwrap();
+        std::fs::write(
+            dir.join("ObjectID.list"),
+            concat!(
+                "63884;Aeonic Talon;Equipment;;80:110:0;lofiObj6:1090;EQUIPMENT,WEAPON,WAND,ST;HDruidST0;;;;8;0;1\n",
+                "48890;;Equipment;;;memoriesObjects8x8:18;EQUIPMENT,ABILITY,ORB,UT,TAB_UT,POWERTIER_A,XPBONUS,COOLDOWN,STATMOD;Teratoma;;;;21;0;1\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            xml_dir.join("equip_lo.xml"),
+            r#"<Objects>
+  <Object id="HDruidST0" type="0xF98C">
+    <Class>Equipment</Class>
+    <Item />
+    <Subattack projectileId="0"><NumProjectiles>1</NumProjectiles></Subattack>
+    <Subattack projectileId="0"><NumProjectiles>1</NumProjectiles></Subattack>
+    <Subattack projectileId="0"><NumProjectiles>1</NumProjectiles></Subattack>
+    <Subattack projectileId="0"><NumProjectiles>1</NumProjectiles></Subattack>
+    <Subattack projectileId="0"><NumProjectiles>1</NumProjectiles></Subattack>
+    <Projectile id="0"><MinDamage>80</MinDamage><MaxDamage>110</MaxDamage></Projectile>
+  </Object>
+</Objects>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            xml_dir.join("equip_design.xml"),
+            r#"<Objects>
+  <Object id="Teratoma" type="0xBEFA">
+    <Class>Equipment</Class>
+    <Item />
+    <OnEnemyHitActivate effect="Hex" duration="3">ApplyCondition</OnEnemyHitActivate>
+    <Activate radius="4.5" baseDamage="500" stackDamage="10">DetonateHex</Activate>
+  </Object>
+</Objects>"#,
+        )
+        .unwrap();
+
+        let mut list = ObjectList::load_from_file(dir.join("ObjectID.list")).unwrap();
+        assert_eq!(merge_equipment_xml_files(&mut list, &dir), 2);
+        for index in 0..5 {
+            assert_eq!(list.subattack_projectile_index(0xF98C, index), Some(0));
+        }
+        assert_eq!(list.subattack_projectile_index(0xF98C, 5), None);
+
+        let asset = list.get(0xF98C).unwrap();
+        assert_eq!(asset.projectiles.len(), 1);
+        assert_eq!(asset.projectiles[0].min_damage, 80);
+        assert_eq!(asset.projectiles[0].max_damage, 110);
+
+        let teratoma = list
+            .ability_effects(0xBEFA)
+            .expect("Teratoma effects parsed");
+        assert!(teratoma.applies_hex);
+        assert_eq!(teratoma.detonate_hex.unwrap().base_damage, 500.0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn test_asset_manager_new() {
@@ -6203,7 +6550,7 @@ mod tests {
         // "Withered Sphinx" and "Calcium God" are names from past seasons: they
         // only exist in the stable table, so they must still match after the
         // assets rename those encounters back (this is the outside-Halloween
-        // search behaviour requested in #56).
+        // search behaviour for the off-season name).
         let withered = encounter_alias_names_matching("Withered Sphinx");
         assert!(withered.iter().any(|n| n == "Withered Sphinx"));
         assert!(withered.iter().any(|n| n == "Grand Sphinx"));
@@ -6300,6 +6647,52 @@ mod tests {
             CURATED_NON_BOSS_TYPES.windows(2).all(|w| w[0] < w[1]),
             "CURATED_NON_BOSS_TYPES must be sorted and unique for binary_search",
         );
+    }
+
+    #[test]
+    fn loot_property_ids_match_live_type_checks() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("ObjectID.list");
+        std::fs::write(
+            &path,
+            "10;UT item;Equipment;Weapon;;;UT;UT item\n\
+             20;ST item;Equipment;Armor;;;ST;ST item\n\
+             30;Shiny UT;Equipment;Weapon;;;SHINY,UT;Shiny UT\n\
+             40;Consumable;Consumable;;;;UT,CONSUMABLE;Consumable\n\
+             50;Shiny ST;Equipment;Armor;;;SHINY,ST;Shiny ST\n\
+             60;Other;Equipment;Weapon;;;UTILITY;Other\n",
+        )
+        .unwrap();
+        let manager = AssetManager::new();
+        manager.set_assets_dir(temp.path());
+        *manager.objects.write().unwrap() = Some(ObjectList::load_from_file(&path).unwrap());
+        *manager.initialized.write().unwrap() = true;
+        assert_eq!(
+            manager.loot_property_item_ids(true, false, false),
+            vec![10, 30]
+        );
+        assert_eq!(
+            manager.loot_property_item_ids(false, true, false),
+            vec![20, 50]
+        );
+        assert_eq!(
+            manager.loot_property_item_ids(false, false, true),
+            vec![30, 50]
+        );
+        for mask in 0..8 {
+            let (ut, st, shiny) = (mask & 1 != 0, mask & 2 != 0, mask & 4 != 0);
+            let ids = manager.loot_property_item_ids(ut, st, shiny);
+            for id in [10, 20, 30, 40, 50, 60, 999] {
+                let expected = (ut && manager.is_ut(id))
+                    || (st
+                        && manager
+                            .get_object(id)
+                            .map(|item| item.is_st())
+                            .unwrap_or(false))
+                    || (shiny && manager.is_shiny(id));
+                assert_eq!(ids.contains(&id), expected, "mask={mask}, id={id}");
+            }
+        }
     }
 
     #[test]

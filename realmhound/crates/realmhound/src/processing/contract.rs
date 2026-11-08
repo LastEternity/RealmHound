@@ -183,6 +183,9 @@ pub enum AudioCommand {
         instance_id: Option<i32>,
         volume: f32,
     },
+    /// Play one custom-chat alert sound. `custom_key` is the alert's
+    /// `custom_chat` / `custom_chat_{id}` key in `SoundSettings::custom_sounds`.
+    PlayCustomChat { custom_key: String, volume: f32 },
     /// Set the output volume (Session 2 audio thread).
     SetVolume(f32),
 }
@@ -213,6 +216,8 @@ pub enum ControlMsg {
     StartCapture(PacketReceiver),
     /// Drop the current capture source (stop draining packets).
     StopCapture,
+    /// The first UI frame has completed; automatic history maintenance may run.
+    StartHistoricalMaintenance,
     /// Flush persistent state and exit the worker loop (app shutdown).
     Shutdown,
     /// Clear the reassembler's ignored-connection set.

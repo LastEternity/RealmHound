@@ -17,27 +17,20 @@ Join our Discord!
 
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey.svg)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)
 ![Language](https://img.shields.io/badge/language-Rust-orange.svg)
 
 ## Features
 
-- **Widget Bar** - Customizable key currencies, seasonal timers, dust, forge materials, and account information available on every page. <img width="787" height="35" alt="image" src="https://github.com/user-attachments/assets/fcfebd8e-f2e3-4f94-9376-7aca745ad353" />
-- **Taskbar** - Customizable mission and quest tracking on every page, with merged objectives, suggested choices, and progress tips. <img width="822" height="796" alt="image" src="https://github.com/user-attachments/assets/33b68130-cc97-45bc-a077-8d786369d6d5" /> <img width="825" height="396" alt="image" src="https://github.com/user-attachments/assets/fdebfb70-9498-4052-a7c5-932f48cf00a9" />
-- **Live Feed** - Rolling log of realm events, dungeon entries, realm and score details, direct messages, alerts, and clipboard callouts. <img width="1605" height="787" alt="image" src="https://github.com/user-attachments/assets/41bd94dd-e83d-483d-93f8-2cf6d674d673" />
-- **Quests** - Daily and event Tinkerer quests with progress, categories, Taskbar tracking, filtering, and claimable-reward reminders. <img width="1603" height="1279" alt="image" src="https://github.com/user-attachments/assets/3c68f46e-dcba-49c0-9058-e942d21588d9" />
-- **Missions** - Seasonal mission progress with status categories, custom ordering, Taskbar tracking, eligibility checks, and reward reminders.<img width="1608" height="1313" alt="image" src="https://github.com/user-attachments/assets/56c6eb07-e200-42ed-8ed3-fa02d6eb7ff1" />
-- **Loot History** - Searchable loot records by item, enemy, dungeon, character, date, and special item type. <img width="1605" height="257" alt="image" src="https://github.com/user-attachments/assets/1880ef93-8689-462d-bcd7-56082960e09e" />
-- **Combat History** - Boss encounter records with player performance, team damage dealt and taken, search, and filters. <img width="1607" height="625" alt="image" src="https://github.com/user-attachments/assets/4647f3f3-99cb-48fb-b60b-4e2a4de42778" /> <img width="889" height="1116" alt="image" src="https://github.com/user-attachments/assets/e5022670-ddc3-4d5c-b259-1227cab19d77" />
-- **Trophy Hall** - Rare item collections by dungeon, with run summaries and discovery history in detailed tooltips. <img width="1607" height="1185" alt="image" src="https://github.com/user-attachments/assets/4ba98eaa-7868-4bcd-b0eb-32f07dad45e3" /> <img width="1601" height="1199" alt="image" src="https://github.com/user-attachments/assets/96b41a8c-0c80-4712-b2c2-25579e519c37" />
-- **Treasury** - Search and count items across observed account storage, with categories and aggregate totals. <img width="1608" height="1231" alt="image" src="https://github.com/user-attachments/assets/2d2c1ec4-e65f-4d18-bebd-4f35467ceccb" />
- <img width="1023" height="696" alt="image" src="https://github.com/user-attachments/assets/ad698f10-a451-4933-9a55-b970d3e8a336" /> <img width="1608" height="406" alt="image" src="https://github.com/user-attachments/assets/3562cf51-5379-4052-b140-0c439c7ff569" />
-- **Vault** - Last-observed replicas of vault and storage containers for browsing and planning without loading them in game. <img width="1585" height="685" alt="image" src="https://github.com/user-attachments/assets/488acc4a-5163-44e6-a65e-8d40b95e6354" /> <img width="1607" height="790" alt="image" src="https://github.com/user-attachments/assets/2db90dbb-1a47-4fbd-bc75-f3a4aefd86b7" />
-- **Characters** - Character overview with equipment, inventories, stats, maxing progress, fame calculations, and milestone tracking. <img width="1598" height="660" alt="image" src="https://github.com/user-attachments/assets/3581f4c9-5e83-4a11-b916-66f4030baea5" /> <img width="1459" height="1127" alt="image" src="https://github.com/user-attachments/assets/433de390-9a0f-4cdf-91f8-a13f682bfd8e" />
-- **Exaltations** - Account-wide exaltation progress by class and stat on one page. <img width="1607" height="616" alt="image" src="https://github.com/user-attachments/assets/7a105ed3-79ba-440b-a620-ab48658c1673" />
-- **Party** - Party overview, watchlists, and copy-ready moderation commands without reopening the in-game Party UI. <img width="1607" height="781" alt="image" src="https://github.com/user-attachments/assets/94196443-26df-4b09-b2ac-b989aa35286f" />
-- **Chat** - Searchable message history for browsing conversations and finding previous contacts. <img width="911" height="357" alt="image" src="https://github.com/user-attachments/assets/661a22f9-de8f-401e-ba3a-b3d63c3fddcb" />
-- **Flexible settings** - Customize what you see and hear. <img width="1052" height="619" alt="image" src="https://github.com/user-attachments/assets/bbffd134-0105-451d-9131-57d57df2ffe0" /> <img width="1053" height="618" alt="image" src="https://github.com/user-attachments/assets/8fed0e73-23fb-4838-97d3-cde78e56d243" />
+- Combat and DPS tracking for boss fights
+- Loot history and trophy collections
+- Quest and mission tracking
+- Account-wide item search
+- Character stats and overview
+- Theoretical DPS calculator
+- Party and chat logs
+
+See the [full feature tour](https://lasteternity.github.io/RealmHound/) for screenshots and details.
 
 
 
@@ -52,6 +45,7 @@ Releases ship a build for each platform:
 | --- | --- | --- |
 | Windows | `RealmHound.exe` | Download and run it. |
 | macOS | `RealmHound-macos-app.zip` | Universal (Apple Silicon and Intel). Unzip and drag `RealmHound.app` to Applications. |
+| Linux | `RealmHound-linux-x86_64.tar.gz` | Extract and run `./packaging/linux/install.sh` (asks for sudo). `libpcap` is required at runtime. |
 
 macOS quarantines anything downloaded through a browser, so the first launch is
 blocked with "cannot be opened because the developer cannot be verified". Clear
@@ -82,6 +76,16 @@ running from `RealmHound.app`; a binary built from source has to be rebuilt.
   Running `sudo RealmHound` also works, but ChmodBPF is safer: it grants capture
   access to your user instead of running the whole app as root.
 
+### Linux
+
+- **x86_64** on Steam/Proton
+- `libpcap` at runtime, plus a one-time `CAP_NET_RAW` grant for the capture
+  helper that `packaging/linux/install.sh` applies (see
+  [Linux build steps](#linux-steamproton))
+- For a prebuilt tarball, the linked runtime libraries are `libpcap.so.1`,
+  `libasound.so.2`, `libssl.so.3`, `libsystemd.so.0`, and `libdbus-1.so.3`,
+  plus the X11/Wayland client libraries your desktop already provides
+
 ## Usage
 
 Many features work best fullscreen. If you use two monitors, consider running
@@ -106,14 +110,73 @@ platform.
 
 ## Building from Source
 
+### Linux (Steam/Proton)
+
+Tested on Debian trixie and Arch-based systems. Install Rust from
+[rustup.rs](https://rustup.rs/); distro packages are often too old.
+
+```sh
+sudo apt install build-essential pkg-config libpcap-dev libasound2-dev libssl-dev libcap2-bin
+cd realmhound
+cargo build --workspace --release --locked
+cd ..
+./packaging/linux/install.sh
+```
+
+`install.sh` copies both binaries into `/usr/local/bin`, grants only
+`CAP_NET_RAW` to the helper, and installs the desktop launcher. Never grant
+capabilities to `RealmHound` itself. Verify with
+`/usr/sbin/getcap /usr/local/bin/realmhound-capture` (some shells omit
+`/usr/sbin` from `PATH`); the expected output includes `cap_net_raw=ep`.
+Re-run the installer after every rebuild, because replacing the helper clears
+its capability. The helper stays world-executable, so any local account on the
+machine can use it to capture port-2050 traffic; this assumes a single-user
+desktop (see [SECURITY.md](SECURITY.md)). Ordinary launches need no sudo:
+
+```sh
+RealmHound
+```
+
+Steam/Proton traffic normally crosses the host network stack, so the helper
+listens passively on libpcap's `any` device with a fixed `tcp port 2050`
+filter: start order and interface changes need no configuration, and
+`REALMHOUND_CAPTURE_INTERFACE=eth0` selects a single interface. The helper
+sends packets only to the unprivileged GUI through a private pipe; it does not
+modify traffic or run as a persistent service.
+
+RealmHound reads Steam's `libraryfolders.vdf` and RotMG's app manifest,
+including additional libraries and Flatpak Steam, then checks the Steam install
+and matching Proton prefix for Unity's `resources.assets`. Override discovery
+with `REALMHOUND_GAME_DIR=/path/to/game`. Game files are read only. Extracted
+assets, account data, and settings live under `~/.local/share/RealmHound`
+(`$XDG_DATA_HOME`); logs under `~/.local/state/RealmHound/logs`
+(`$XDG_STATE_HOME`).
+
+Troubleshooting:
+
+- Capture fails: check `getcap` on the helper, then the log above.
+- "Waiting for a connection": enter a realm or change maps; the cipher cannot
+  be reconstructed from the middle of an existing stream.
+- Missing sprites or names: confirm Steam finished downloading the Unity
+  client, or set `REALMHOUND_GAME_DIR`.
+
+There is no in-app updater on Linux yet: rebuild and re-run `install.sh`. The
+existing protocol pipeline decodes IPv4 game connections; IPv6 is a current
+limitation.
+
 ### Prerequisites
 
 All platforms need the stable [Rust](https://rustup.rs/) toolchain, plus:
 
 | Platform | Additional prerequisites |
 | --- | --- |
-| Windows | [Npcap SDK](https://npcap.com/#download), with its `Lib\x64` directory on `LIB` |
+| Windows | Visual Studio Build Tools with **Desktop development with C++**, MSVC tools, and a Windows SDK; use Rust's MSVC toolchain |
 | macOS | Xcode Command Line Tools (`xcode-select --install`) - these supply `libpcap` |
+| Linux | Debian/Ubuntu: `build-essential`, `pkg-config`, `libpcap-dev`, `libasound2-dev`, `libssl-dev` (see [Linux build steps](#linux-steamproton)) |
+
+Windows builds generate the `wpcap.lib` import library automatically; the Npcap
+SDK is not required. Running the app or tests still requires
+[Npcap](https://npcap.com/#download) with WinPcap compatibility mode.
 
 ### Build
 
@@ -136,11 +199,12 @@ tools/macos/make-app-bundle.sh realmhound/target/release/RealmHound realmhound/t
 - **Automatic updates** fetch the build for the platform they are running on and
   verify its SHA-256 before swapping it in. A release that publishes no binary
   for a platform reports that instead of offering one it cannot run.
-- **Game assets** are read from the RotMG install: `%LOCALAPPDATA%` on Windows
-  and `~/.local/share/RealmOfTheMadGod` on macOS. See
-  [Game assets](#game-assets).
-- **RealmHound's own data** lives under `%LOCALAPPDATA%\RealmHound` on Windows
-  and `~/Library/Application Support/RealmHound` on macOS.
+- **Game assets** are read from the RotMG install: `%LOCALAPPDATA%` on Windows,
+  `~/.local/share/RealmOfTheMadGod` on macOS, and the Steam/Proton prefix on
+  Linux. See [Game assets](#game-assets).
+- **RealmHound's own data** lives under `%LOCALAPPDATA%\RealmHound` on Windows,
+  `~/Library/Application Support/RealmHound` on macOS, and
+  `~/.local/share/RealmHound` on Linux.
 
 ## Game assets
 
@@ -153,6 +217,7 @@ launcher's install location is known for each platform:
 | --- | --- |
 | Windows | `%LOCALAPPDATA%\RealmOfTheMadGod\Production\` |
 | macOS | `~/.local/share/RealmOfTheMadGod/Production/` |
+| Linux | Steam library's Proton prefix (see [Linux build steps](#linux-steamproton)) |
 
 Without a local install the app still captures and records everything, but
 items and enemies show as numeric IDs and icons render empty.

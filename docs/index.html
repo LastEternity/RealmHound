@@ -3,34 +3,391 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>RealmHound documentation</title>
+<title>RealmHound - RotMG (Realm of the Mad God) packet capture and analytics</title>
+<meta name="description" content="RealmHound is a high performance packet sniffer for Realm of the Mad God on Windows and macOS, with combat history, DPS tracking, loot history, quests, missions, characters, and account tools.">
+<link rel="canonical" href="https://lasteternity.github.io/RealmHound/">
+<meta name="robots" content="index,follow">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="RealmHound">
+<meta property="og:title" content="RealmHound - RotMG packet capture, combat and loot analytics">
+<meta property="og:description" content="Combat history, DPS tracking, loot history, quests, missions, characters, and account tools for Realm of the Mad God.">
+<meta property="og:url" content="https://lasteternity.github.io/RealmHound/">
+<meta property="og:image" content="https://lasteternity.github.io/RealmHound/assets/features/combat-history-1.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="RealmHound - RotMG packet capture and analytics">
+<meta name="twitter:description" content="Combat history, DPS tracking, loot history, quests, missions, characters, and account tools for Realm of the Mad God.">
+<meta name="twitter:image" content="https://lasteternity.github.io/RealmHound/assets/features/combat-history-1.png">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "RealmHound",
+  "url": "https://lasteternity.github.io/RealmHound/",
+  "description": "A high performance packet sniffer and analysis tool for Realm of the Mad God with combat history, DPS tracking, loot history, quests, missions, characters, and account tools.",
+  "applicationCategory": "GameApplication",
+  "operatingSystem": "Windows 10, Windows 11, macOS 11 or newer",
+  "downloadUrl": "https://github.com/LastEternity/RealmHound/releases/latest",
+  "sameAs": [
+    "https://github.com/LastEternity/RealmHound",
+    "https://discord.gg/4zdy5Z4Sfd"
+  ],
+  "isAccessibleForFree": true,
+  "featureList": [
+    "Combat and DPS tracking for boss fights",
+    "Loot history and trophy collections",
+    "Quest and mission tracking",
+    "Account-wide item search",
+    "Character stats and overview",
+    "Theoretical DPS calculator",
+    "Party and chat logs"
+  ],
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "license": "https://github.com/LastEternity/RealmHound/blob/main/LICENSE",
+  "screenshot": [
+    "https://lasteternity.github.io/RealmHound/assets/features/combat-history-1.png",
+    "https://lasteternity.github.io/RealmHound/assets/features/loot-history-1.png",
+    "https://lasteternity.github.io/RealmHound/assets/features/trophy-hall-1.png"
+  ],
+  "publisher": {
+    "@type": "Organization",
+    "name": "RealmHound",
+    "url": "https://lasteternity.github.io/RealmHound/",
+    "sameAs": "https://github.com/LastEternity/RealmHound"
+  }
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Is RealmHound free?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. RealmHound is free and open source under the MIT License, with no account, subscription or ads. Every release is published on GitHub Releases."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Which platforms does RealmHound support?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "RealmHound runs on Windows 10 and 11 (64-bit) and on macOS 11 or newer, for both Apple Silicon and Intel Macs."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does RealmHound need Npcap on Windows?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. Packet capture on Windows requires Npcap, installed with WinPcap compatibility mode. macOS ships libpcap, so there is nothing extra to install, but capture needs read access to /dev/bpf*, granted once through Wireshark's ChmodBPF helper."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does RealmHound modify the game or inject packets?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. RealmHound only passively captures network traffic. It does not modify game data, inject packets, or reveal anything hidden from your client; it organises the data you already receive and have already observed."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Is RealmHound a DPS meter?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "RealmHound records combat history and DPS for boss fights and attributes damage to individual sources, alongside loot history, trophy collections, quests, missions, character stats and a theoretical DPS calculator."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Is RealmHound open source?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. RealmHound is MIT licensed and the full source code is available at github.com/LastEternity/RealmHound."
+      }
+    }
+  ]
+}
+</script>
 <style>
-  :root { color-scheme: dark; }
-  body { margin: 0; padding: 3rem 1.25rem; font: 16px/1.6 system-ui, sans-serif;
-         background: #14161a; color: #e6e8eb; }
-  main { max-width: 52rem; margin: 0 auto; }
-  h1 { font-size: 1.9rem; margin: 0 0 .35rem; }
-  p.lede { color: #a7adb7; margin-top: 0; }
-  ul { padding-left: 1.2rem; }
-  li { margin: .55rem 0; }
-  a { color: #7cc4ff; }
-  code { color: #d7dbe2; }
+  :root {
+    color-scheme: dark;
+    --bg: #14161a;
+    --panel: #1b1e24;
+    --panel-2: #20242b;
+    --text: #e6e8eb;
+    --muted: #a7adb7;
+    --line: #2c313a;
+    --link: #7cc4ff;
+    --accent: #8ee6a1;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: radial-gradient(circle at 50% -20%, #1d2a33 0, var(--bg) 45rem);
+    color: var(--text);
+  }
+  a { color: var(--link); }
+  a:hover { color: #a9dbff; }
+  .wrap { width: min(72rem, 100%); margin: 0 auto; padding: 0 1.25rem; }
+  .hero { padding: 4.5rem 0 2.75rem; text-align: center; }
+  .eyebrow { margin: 0 0 .5rem; color: var(--accent); font-size: .8rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+  h1 .h1-sub { display: block; margin-top: .4rem; font-size: clamp(1rem, 2.6vw, 1.45rem); font-weight: 600; letter-spacing: -.01em; color: var(--muted); }
+  h1 { margin: 0; font-size: clamp(2.6rem, 7vw, 4.6rem); line-height: 1.05; letter-spacing: -.04em; }
+  .intro { max-width: 56rem; margin: 1.2rem auto 0; color: var(--muted); font-size: 1.08rem; }
+  .intro p { margin: .7rem 0; }
+  .actions { display: flex; flex-wrap: wrap; gap: .65rem; justify-content: center; margin: 1.7rem 0 0; }
+  .button { display: inline-block; padding: .65rem 1.1rem; border: 1px solid var(--line); border-radius: .55rem; background: var(--panel); color: var(--text); font-weight: 650; text-decoration: none; }
+  .button.primary { border-color: #3d7a50; background: #1f3a29; color: #c9f5d4; }
+  .note { max-width: 42rem; margin: 1.2rem auto 0; color: #858c97; font-size: .86rem; }
+  main { padding-bottom: 4rem; }
+  section { padding: 2.4rem 0; border-top: 1px solid var(--line); }
+  h2 { margin: 0 0 .5rem; font-size: 1.85rem; letter-spacing: -.02em; }
+  .section-lede { max-width: 48rem; margin: 0 0 1.5rem; color: var(--muted); }
+  .feature { padding: 2rem 0; border-top: 1px solid var(--line); }
+  .feature:first-of-type { border-top: 0; padding-top: 0; }
+  .feature h3 { display: flex; align-items: center; gap: .55rem; margin: 0 0 .55rem; font-size: 1.45rem; letter-spacing: -.01em; }
+  .feature p { max-width: 72rem; margin: .55rem 0; color: var(--muted); }
+  .tab-icon { width: 24px; height: 24px; flex: none; border: 0; border-radius: 0; background: none; image-rendering: pixelated; }
+  .tab-icon-emoji { font-size: 1.25rem; line-height: 1; }
+  .feature ul { max-width: 72rem; margin: .55rem 0; padding-left: 1.3rem; color: var(--muted); }
+  .feature li { margin: .18rem 0; }
+  figure { margin: 1rem 0 1.65rem; }
+  .feature figure:last-child { margin-bottom: 0; }
+  img { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: .55rem; background: var(--panel); }
+  .shot-wide { max-width: 72rem; }
+  .shot-widget { max-width: 787px; }
+  .shot-medium { max-width: 56rem; }
+  .shot-tall { max-width: 46rem; }
+  .shot-portrait { max-width: 42rem; }
+  .panel { background: linear-gradient(180deg, var(--panel), var(--panel-2)); border: 1px solid var(--line); border-radius: .9rem; padding: 1.5rem; margin-top: 2rem; }
+  .panel h2 { font-size: 1.45rem; }
+  .panel h3 { margin: 1.5rem 0 .35rem; font-size: 1.05rem; }
+  .panel h3:first-of-type { margin-top: .9rem; }
+  footer { padding: 2rem 0 3rem; border-top: 1px solid var(--line); color: #858c97; font-size: .9rem; }
+  footer p { max-width: 55rem; }
+  @media (max-width: 760px) {
+    .hero { padding-top: 3rem; }
+    .feature { padding: 1.6rem 0; }
+  }
 </style>
 </head>
 <body>
-<main>
-  <h1>RealmHound documentation</h1>
-  <p class="lede">Reference material for RealmHound's capture, parsing and analysis features.</p>
-  <h2>Research</h2>
-  <ul>
-    <li>
-      <a href="research/damage-sources-status.html">Player damage sources: implementation status</a>
-      — interactive matrix of every effect that deals player damage, with its
-      theoretical-DPS and Combat History attribution status.
-      <br><a href="research/damage-sources-status.md">Markdown source</a>
-    </li>
-  </ul>
-  <p><a href="https://github.com/LastEternity/RealmHound">Back to the RealmHound repository</a></p>
+<header class="hero">
+  <div class="wrap">
+    <p class="eyebrow">Realm of the Mad God analytics</p>
+    <h1>RealmHound <span class="h1-sub">RotMG packet capture, DPS tracker and loot analytics</span></h1>
+    <div class="intro">
+      <p>RealmHound is a high performance packet sniffer and analytics companion for <strong>Realm of the Mad God</strong> (RotMG) on Windows and macOS. Its purpose is to help you access and make sense of your in-game data, and to improve your experience by presenting information you already have in a clearer, more usable way.</p>
+      <p>It doesn't reveal anything hidden from you in game; it simply organises and presents your own account's data and the activity you've already observed. Many of these features are best experienced fullscreen, so if you have two monitors we highly recommend running RealmHound on the second one.</p>
+    </div>
+    <p class="actions">
+      <a class="button primary" href="https://github.com/LastEternity/RealmHound/releases/latest">Download</a>
+      <a class="button" href="https://github.com/LastEternity/RealmHound">GitHub</a>
+      <a class="button" href="https://discord.gg/4zdy5Z4Sfd">Discord</a>
+      <a class="button" href="#documentation">Documentation</a>
+    </p>
+  </div>
+</header>
+<main class="wrap">
+  <section id="features">
+    <h2>Features</h2>
+    <p class="section-lede">Here's what we have:</p>
+    <article class="feature" id="widget-bar">
+      <h3><img class="tab-icon" src="assets/tab-icons/widget-bar.png" width="24" height="24" alt=""> Widget bar</h3>
+      <p>Important in-game currencies and account information accessible on all pages. See your dust, forge materials, battlepass/season end timer and more, without having to visit respective areas where the game shows this information.</p>
+      <figure class="shot-widget">
+        <img src="assets/features/widget-bar-1.png" width="787" height="35" loading="lazy" decoding="async" alt="RealmHound widget bar showing in-game currencies, dust, forge materials, and season timers">
+      </figure>
+    </article>
+
+    <article class="feature" id="taskbar">
+      <h3><img class="tab-icon" src="assets/tab-icons/taskbar.png" width="24" height="24" alt=""> Taskbar</h3>
+      <p>A compact tracker of remaining objectives from your active missions and daily quests, customizable and visible on every page. It merges quests and missions with matching objectives, suggests the preferable option when missions offer multiple choices, and links missions with similar objectives when they can progress together.</p>
+      <figure class="shot-medium">
+        <img src="assets/features/taskbar-2.png" width="822" height="396" loading="lazy" decoding="async" alt="RealmHound Taskbar showing active objectives and suggested farming areas">
+      </figure>
+      <p>Detailed task information is available in hover tooltips, along with helpful tips about what counts toward the objective and where to find it in the realm.</p>
+      <figure class="shot-portrait">
+        <img src="assets/features/taskbar-1.png" width="822" height="796" loading="lazy" decoding="async" alt="RealmHound Taskbar tooltip showing the dungeons that count toward an objective">
+      </figure>
+    </article>
+
+    <article class="feature" id="live-feed">
+      <h3><img class="tab-icon" src="assets/tab-icons/live-feed.png" width="24" height="24" alt=""> Live Feed</h3>
+      <p>This is a hub for all information you see when you play in a realm. It keeps a short-term event log of:</p>
+      <ul>
+        <li>Notifications of events announced by Oryx in your realm</li>
+        <li>Dungeons you chose to enter</li>
+        <li>Current server, realm name, and score %</li>
+        <li>Incoming direct messages</li>
+        <li>Alerts and notifications</li>
+      </ul>
+      <p>This page also helps reduce typing when calling things in the chat for other players by using handy clipboard callouts.</p>
+      <figure class="shot-wide">
+        <img src="assets/features/live-feed-1.png" width="1605" height="787" loading="lazy" decoding="async" alt="RealmHound Live Feed showing realm events, dungeon entries, server and realm details, direct messages, alerts, and clipboard callouts">
+      </figure>
+    </article>
+    <article class="feature" id="quests">
+      <h3><img class="tab-icon" src="assets/tab-icons/quests.png" width="24" height="24" alt=""> Quests</h3>
+      <p>Daily and event quests from the Tinkerer all displayed on one page for easy access outside of this location, sorted into categories for your convenience. Visit Tinkerer Cave once per day and wait for the quests to load, then check your progress towards every quest, hide unwanted quests or entire categories, and choose which quests you want to track in the Taskbar. It also reminds you to claim chest rewards when you have the required Marks for a quest in Seasonal or Regular storage.</p>
+      <figure class="shot-tall">
+        <img src="assets/features/quests-1.png" width="1603" height="1279" loading="lazy" decoding="async" alt="RealmHound Quests page showing daily and event Tinkerer quests, categories, progress, and reward reminders">
+      </figure>
+    </article>
+
+    <article class="feature" id="missions">
+      <h3><img class="tab-icon" src="assets/tab-icons/missions.png" width="24" height="24" alt=""> Missions</h3>
+      <p>A list of all current-season missions, synced live with your progress and sorted into categories by status. Log into the game, then press Refresh in RealmHound to load/re-sync the missions. Build your own mission list by dragging mission cards or hiding those you're not interested in, then choose which missions you want to track in the Taskbar. It also reminds you to claim rewards when you have completed missions, checks whether your current character qualifies for each mission, and provides helpful tooltips for mission targets.</p>
+      <figure class="shot-tall">
+        <img src="assets/features/missions-1.png" width="1608" height="1313" loading="lazy" decoding="async" alt="RealmHound Missions page showing current-season missions, status categories, eligibility, and rewards">
+      </figure>
+    </article>
+
+    <article class="feature" id="loot-history">
+      <h3><img class="tab-icon" src="assets/tab-icons/loot-history.png" width="24" height="24" alt=""> Loot History</h3>
+      <p>Logs of loot dropped by monsters and flexible search through those logs. Try searching by item, enemy or a dungeon name. You can also view loot obtained by a certain character, apply filters to only show special items, or search by date.</p>
+      <figure class="shot-wide">
+        <img src="assets/features/loot-history-1.png" width="1605" height="257" loading="lazy" decoding="async" alt="RealmHound Loot History showing searchable monster loot records with item, enemy, dungeon, character, and date filters">
+      </figure>
+    </article>
+
+    <article class="feature" id="combat-history">
+      <h3><img class="tab-icon" src="assets/tab-icons/combat-history.png" width="24" height="24" alt=""> Combat History</h3>
+      <p>Records of your boss fights with detailed breakdown of each player's performance. You can view your entire team's damage dealt and taken.</p>
+      <figure class="shot-tall">
+        <img src="assets/features/combat-history-2.png" width="887" height="1291" loading="lazy" decoding="async" alt="RealmHound Combat History showing a boss fight with team damage dealt and taken">
+      </figure>
+      <p>My Performance tab shows a breakdown on your damage and all the variables that contributed to calculating it.</p>
+      <figure class="shot-tall">
+        <img src="assets/features/combat-my-performance.png" width="780" height="1187" loading="lazy" decoding="async" alt="RealmHound My Performance tab showing damage, stats, gear, damage by weapon and ability, and boosts">
+      </figure>
+      <p>Use flexible search and filters to navigate all your past encounters and dungeons.</p>
+      <figure class="shot-wide">
+        <img src="assets/features/combat-history-1.png" width="1607" height="625" loading="lazy" decoding="async" alt="RealmHound Combat History list showing past encounters with search and filters">
+      </figure>
+    </article>
+    <article class="feature" id="trophy-hall">
+      <h3><img class="tab-icon" src="assets/tab-icons/trophy-hall.png" width="24" height="24" alt=""> Trophy Hall</h3>
+      <p>Browse all of your rare item collections meticulously sorted by dungeon.</p>
+      <figure class="shot-tall">
+        <img src="assets/features/trophy-hall-1.png" width="1602" height="1182" loading="lazy" decoding="async" alt="RealmHound Trophy Hall showing rare item collections sorted by dungeon">
+      </figure>
+      <p>You can view summary of items obtained across all your dungeon runs inside individual dungeon pages, and explore your past and future item discoveries via tooltips.</p>
+      <figure class="shot-tall">
+        <img src="assets/features/trophy-hall-2.png" width="1602" height="1026" loading="lazy" decoding="async" alt="RealmHound Trophy Hall dungeon page showing item collection summaries and discovery tooltips">
+      </figure>
+    </article>
+
+    <article class="feature" id="treasury">
+      <h3><img class="tab-icon" src="assets/tab-icons/treasury.png" width="24" height="24" alt=""> Treasury</h3>
+      <p>Browse and search every item on your account across all possible storage containers. View totals table with aggregated item count.</p>
+      <figure class="shot-tall">
+        <img src="assets/features/treasury-1.png" width="1608" height="1231" loading="lazy" decoding="async" alt="RealmHound Treasury showing every item on the account with aggregate totals">
+      </figure>
+      <p>Filter items and blueprints by dungeon.</p>
+      <figure class="shot-medium">
+        <img src="assets/features/treasury-2.png" width="1023" height="696" loading="lazy" decoding="async" alt="RealmHound Treasury filtered by dungeon">
+      </figure>
+      <p>Or find whole item groups by categories.</p>
+      <figure class="shot-wide">
+        <img src="assets/features/treasury-3.png" width="1608" height="406" loading="lazy" decoding="async" alt="RealmHound Treasury showing item groups by category">
+      </figure>
+    </article>
+
+    <article class="feature" id="vault">
+      <h3><img class="tab-icon" src="assets/tab-icons/vault.png" width="24" height="24" alt=""> Vault</h3>
+      <p>Accurate in-game replicas of your vault and other storage containers without loading these areas in game.</p>
+      <figure class="shot-wide">
+        <img src="assets/features/vault-1.png" width="1585" height="685" loading="lazy" decoding="async" alt="RealmHound Vault showing accurate replicas of vault and storage containers">
+      </figure>
+      <p>Helps to organise your vault and other storage space.</p>
+      <figure class="shot-medium">
+        <img src="assets/features/vault-2.png" width="1607" height="790" loading="lazy" decoding="async" alt="RealmHound Vault showing storage organisation and pet inventories">
+      </figure>
+    </article>
+    <article class="feature" id="characters">
+      <h3><img class="tab-icon" src="assets/tab-icons/characters.png" width="24" height="24" alt=""> Characters</h3>
+      <p>All your characters displayed on one page, sorted by mode (Seasonal/Regular) with flexible settings that show their equipment and inventories, statistics and maxing progression.</p>
+      <figure class="shot-wide">
+        <img src="assets/features/characters-1.png" width="1598" height="660" loading="lazy" decoding="async" alt="RealmHound Characters page showing all characters with equipment, inventories, stats, and maxing progression">
+      </figure>
+      <p>Individual character statistic pages have a built-in fame calculator and helpful tooltips to track progress for character fame reward milestones.</p>
+      <figure class="shot-tall">
+        <img src="assets/features/characters-2.png" width="1459" height="1127" loading="lazy" decoding="async" alt="RealmHound character statistics page showing stats, fame calculator, and reward milestone tooltips">
+      </figure>
+    </article>
+
+    <article class="feature" id="exaltations">
+      <h3><img class="tab-icon" src="assets/tab-icons/exaltations.png" width="24" height="24" alt=""> Exaltations</h3>
+      <p>Account-wide exaltation progress broken down by class and different stats, all in one page.</p>
+      <figure class="shot-wide">
+        <img src="assets/features/exaltations-1.png" width="1607" height="616" loading="lazy" decoding="async" alt="RealmHound Exaltations page showing account-wide progress by class and stat">
+      </figure>
+    </article>
+
+    <article class="feature" id="party">
+      <h3><img class="tab-icon" src="assets/tab-icons/party.png" width="24" height="24" alt=""> Party</h3>
+      <p>Party management, player information and other utilities. Helps keeping track of the party without opening Party UI in game.</p>
+      <figure class="shot-wide">
+        <img src="assets/features/party-1.png" width="1607" height="781" loading="lazy" decoding="async" alt="RealmHound Party page showing party management, player information, and utilities">
+      </figure>
+    </article>
+
+    <article class="feature" id="chat">
+      <h3><img class="tab-icon" src="assets/tab-icons/chat.png" width="24" height="24" alt=""> Chat</h3>
+      <p>Searchable chat history and message logs. Browse entire conversations or find players you interacted with through chat - it's all stored here when you need it.</p>
+      <figure class="shot-medium">
+        <img src="assets/features/chat-1.png" width="911" height="357" loading="lazy" decoding="async" alt="RealmHound Chat page showing searchable chat history and message logs">
+      </figure>
+    </article>
+
+    <article class="feature" id="settings">
+      <h3><span class="tab-icon-emoji" aria-hidden="true">⚙</span> Settings</h3>
+      <p>RealmHound has very flexible settings. Make sure to check them out to customise it to your liking!</p>
+      <figure class="shot-medium">
+        <img src="assets/features/settings-1.png" width="1052" height="619" loading="lazy" decoding="async" alt="RealmHound Settings showing Live Feed, widget bar, taskbar, loot history, combat history, and notification options">
+      </figure>
+    </article>
+  </section>
+
+  <section id="documentation">
+    <div class="panel">
+      <h2>Documentation</h2>
+      <p class="section-lede">Reference material for RealmHound's capture, parsing, and analysis features.</p>
+      <ul>
+        <li>
+          <a href="research/damage-sources-status.html">Player damage sources: implementation status</a>
+          is an interactive matrix of every effect that deals player damage, with its theoretical DPS and Combat History attribution status.
+          The <a href="research/damage-sources-status.md">Markdown source</a> is also available.
+        </li>
+      </ul>
+    </div>
+  <section id="faq">
+    <div class="panel">
+      <h2>Frequently asked questions</h2>
+      <h3>Is RealmHound free?</h3>
+      <p>Yes. RealmHound is free and open source under the MIT License, with no account, subscription or ads. Every release is published on <a href="https://github.com/LastEternity/RealmHound/releases/latest">GitHub Releases</a>.</p>
+      <h3>Which platforms does RealmHound support?</h3>
+      <p>RealmHound runs on Windows 10 and 11 (64-bit) and on macOS 11 or newer, for both Apple Silicon and Intel Macs.</p>
+      <h3>Does RealmHound need Npcap on Windows?</h3>
+      <p>Yes. Packet capture on Windows requires <a href="https://npcap.com/#download">Npcap</a>, installed with WinPcap compatibility mode. macOS ships libpcap, so there is nothing extra to install, but capture needs read access to <code>/dev/bpf*</code>, granted once through Wireshark's ChmodBPF helper.</p>
+      <h3>Does RealmHound modify the game or inject packets?</h3>
+      <p>No. RealmHound only passively captures network traffic. It does not modify game data, inject packets, or reveal anything hidden from your client; it organises the data you already receive and have already observed.</p>
+      <h3>Is RealmHound a DPS meter?</h3>
+      <p>RealmHound records combat history and DPS for boss fights and attributes damage to individual sources, alongside loot history, trophy collections, quests, missions, character stats and a theoretical DPS calculator.</p>
+      <h3>Is RealmHound open source?</h3>
+      <p>Yes. RealmHound is MIT licensed and the full source code is available at <a href="https://github.com/LastEternity/RealmHound">github.com/LastEternity/RealmHound</a>.</p>
+    </div>
+  </section>
 </main>
+<footer class="wrap">
+  <p>RealmHound is free and open source under the MIT License. It passively captures network traffic and does not modify game data or inject packets. Use it at your own risk and in accordance with the game's Terms of Service.</p>
+  <p><a href="https://github.com/LastEternity/RealmHound">Source code</a> · <a href="https://github.com/LastEternity/RealmHound/releases/latest">Releases</a> · <a href="https://discord.gg/4zdy5Z4Sfd">Discord</a></p>
+</footer>
 </body>
 </html>

@@ -333,6 +333,9 @@ pub struct PacketProcessor {
     seq: u64,
     /// Scratch buffer of updates emitted for the current `process_available` call.
     updates: Vec<UiUpdate>,
+    repaired_combat_dirty: bool,
+    repaired_loot_dirty: bool,
+    loot_maintenance_log: realmhound_core::maintenance::MaintenanceLog,
 
     /// Optional raw-packet recorder. Activated at capture start when the
     /// `REALMHOUND_RECORD` env var is set (spike/dev tool for Combat History).
@@ -454,9 +457,16 @@ impl PacketProcessor {
             session
         };
 
-        // The loot writer creates the schema before the UI reader opens, and its
-        // v13 backfill correlates against the paired combat history database.
-        let mut loot_tracker = match LootTracker::with_database(&loot_path, Some(&combat_path)) {
+        let mut combat = CombatManager::new();
+        combat.open_database(&combat_path, Some(&loot_path));
+        if let Ok(s) = settings.read() {
+            combat.set_history_settings(s.combat_history.clone());
+        }
+
+        let mut loot_tracker = match combat
+            .historical_fight_cutoff()
+            .and_then(|cutoff| LootTracker::with_database(&loot_path, Some(&combat_path), cutoff))
+        {
             Ok(tracker) => {
                 tracing::info!("[LOOT] Initialized loot tracker with database");
                 tracker
@@ -471,12 +481,6 @@ impl PacketProcessor {
         };
         if let Ok(s) = settings.read() {
             loot_tracker.set_tracking_settings(&s.loot_tracking);
-        }
-
-        let mut combat = CombatManager::new();
-        combat.open_database(&combat_path, Some(&loot_path));
-        if let Ok(s) = settings.read() {
-            combat.set_history_settings(s.combat_history.clone());
         }
 
         Self {
@@ -504,6 +508,9 @@ impl PacketProcessor {
             vault_view_gen: 0,
             seq: 0,
             updates: Vec::new(),
+            repaired_combat_dirty: false,
+            repaired_loot_dirty: false,
+            loot_maintenance_log: realmhound_core::maintenance::MaintenanceLog::default(),
             recorder: None,
             realm_entered_at: None,
             keyper_towers_announced: false,
@@ -554,14 +561,21 @@ impl PacketProcessor {
             combat.set_history_settings(s.combat_history.clone());
         }
 
+        let combat_cutoff =
+            combat
+                .historical_fight_cutoff()
+                .map_err(|source| ProcessorInitError::Database {
+                    label: "combat",
+                    detail: source.to_string(),
+                })?;
         // Loot writer second: creates the schema before the UI reader opens.
         let mut loot_tracker =
-            LootTracker::with_database(&loot_path, Some(&combat_path)).map_err(|source| {
-                ProcessorInitError::Database {
+            LootTracker::with_database(&loot_path, Some(&combat_path), combat_cutoff).map_err(
+                |source| ProcessorInitError::Database {
                     label: "loot",
                     detail: source.to_string(),
-                }
-            })?;
+                },
+            )?;
         if let Ok(s) = settings.read() {
             loot_tracker.set_tracking_settings(&s.loot_tracking);
         }
@@ -591,6 +605,9 @@ impl PacketProcessor {
             vault_view_gen: 0,
             seq: 0,
             updates: Vec::new(),
+            repaired_combat_dirty: false,
+            repaired_loot_dirty: false,
+            loot_maintenance_log: realmhound_core::maintenance::MaintenanceLog::default(),
             recorder: None,
             realm_entered_at: None,
             keyper_towers_announced: false,
@@ -637,6 +654,9 @@ impl PacketProcessor {
             vault_view_gen: 0,
             seq: 0,
             updates: Vec::new(),
+            repaired_combat_dirty: false,
+            repaired_loot_dirty: false,
+            loot_maintenance_log: realmhound_core::maintenance::MaintenanceLog::default(),
             recorder: None,
             realm_entered_at: None,
             keyper_towers_announced: false,
@@ -952,7 +972,7 @@ impl PacketProcessor {
                 }
                 // The character list reports each character's Blood Ritual, which is
                 // what makes the ritual known for characters that are not the live
-                // one (issue #64). The list can lag behind the live status, so a
+                // one. The list can lag behind the live status, so a
                 // live observation (set or cleared) takes precedence over it.
                 let live_char_id = self.live_char_id;
                 let mut challenge_changed = false;
@@ -961,7 +981,7 @@ impl PacketProcessor {
                     // The Crucible marker is never taken from this list, in either
                     // direction: it is only ever *set* by the character's own live
                     // CRUCIBLE stat, and cleared by that same stat or a new season's
-                    // definitions (issue #63/#66). The list's `CrucibleActive` flag
+                    // definitions. The list's `CrucibleActive` flag
                     // is stale, so preserving the live-detected value in
                     // `update_from_api` is what matters here.
                     //
@@ -1063,7 +1083,10 @@ impl PacketProcessor {
             }
             // Capture-lifecycle messages are handled by the worker loop, not the
             // processor; ignore them here for exhaustiveness.
-            ControlMsg::StartCapture(_) | ControlMsg::StopCapture | ControlMsg::Shutdown => {}
+            ControlMsg::StartCapture(_)
+            | ControlMsg::StopCapture
+            | ControlMsg::Shutdown
+            | ControlMsg::StartHistoricalMaintenance => {}
         }
     }
 
@@ -1397,7 +1420,7 @@ impl PacketProcessor {
     /// (Crucible x Blood Ritual tier). None of these ride the wire during a fight,
     /// so the engine can only learn them from here; resolving them through the
     /// same helper the theoretical DPS page uses is what keeps the two readouts
-    /// on the same numbers (issue #64).
+    /// on the same numbers.
     fn sync_shot_damage_bonus(&mut self) {
         let bonus = self
             .live_char_id
@@ -1492,6 +1515,62 @@ impl PacketProcessor {
     /// Whether lifecycle updates are waiting to be forwarded without packets.
     pub fn has_pending_updates(&self) -> bool {
         !self.updates.is_empty()
+    }
+
+    pub fn historical_maintenance_batch(&mut self) -> Result<(bool, bool), String> {
+        if !self
+            .combat
+            .has_legacy_repairs()
+            .map_err(|error| error.to_string())?
+        {
+            if let Some(db) = self.loot_tracker.database_mut() {
+                if !db
+                    .awaits_combat_completion()
+                    .map_err(|error| error.to_string())?
+                    || self
+                        .combat
+                        .loot_completion_repairs_complete()
+                        .map_err(|error| error.to_string())?
+                {
+                    let (changed, pending) = db
+                        .historical_repair_batch_logged(&mut self.loot_maintenance_log)
+                        .map_err(|error| error.to_string())?;
+                    self.repaired_loot_dirty |= changed;
+                    if changed || pending {
+                        return Ok((changed, true));
+                    }
+                } else {
+                    self.loot_maintenance_log.deferred(
+                        "loot-023-combat-final",
+                        "waiting for Combat kill-proof repairs",
+                    );
+                }
+            }
+        }
+        let char_ids: Vec<_> = self
+            .account_data
+            .characters
+            .characters
+            .iter()
+            .chain(self.account_data.characters.dead_characters.iter())
+            .map(|c| c.char_id)
+            .collect();
+        let result = self
+            .combat
+            .historical_maintenance_batch(&char_ids)
+            .map_err(|e| e.to_string())?;
+        self.fold_deferred_combat();
+        self.repaired_combat_dirty |= result.0;
+        Ok(result)
+    }
+
+    pub fn publish_repaired_history(&mut self) {
+        if std::mem::take(&mut self.repaired_combat_dirty) {
+            self.emit(UiPayload::CombatHistoryChanged);
+        }
+        if std::mem::take(&mut self.repaired_loot_dirty) {
+            self.emit(UiPayload::LootBatchAdded);
+        }
     }
 
     /// Process a batch of raw captured packets, returning the ordered updates
@@ -2473,7 +2552,8 @@ impl PacketProcessor {
                 // Location update + encounter clearing handled by LiveFeedPanel (broadcast).
                 // Remaining: notify loot tracker of new map.
                 self.loot_tracker.on_map_info(display_name, fp);
-                self.combat.on_map_change(display_name, fp, now_ms());
+                self.combat
+                    .on_map_change(display_name, fp, now_ms(), dungeon_modifiers);
 
                 // Lost Halls Rune monuments: surface a single combined entry when
                 // the player enters Oryx's Sanctuary, listing only the monuments a
@@ -2729,32 +2809,55 @@ impl PacketProcessor {
                                     | ChatType::Guild
                                     | ChatType::Whisper
                             ) {
-                                let (mention_ping, custom_ping) = self
+                                // Normalize the body once and reuse it for every
+                                // configured alert instead of per variant.
+                                let normalized_body =
+                                    realmhound_core::chat_ping::NormalizedChatBody::new(
+                                        &chat_msg.text,
+                                    );
+                                let (mention_ping, custom_pings) = self
                                     .settings
                                     .read()
                                     .map(|s| {
-                                        let pings = realmhound_core::chat_ping::pings_for(
+                                        let pings = normalized_body.pings_for(
                                             &chat_msg.text,
                                             me.as_deref(),
-                                            s.sound.custom_chat_text.as_str(),
+                                            "",
                                         );
+                                        let custom = if SoundType::CustomChat.is_enabled(&s.sound) {
+                                            s.sound
+                                                .custom_chat_alerts
+                                                .iter()
+                                                .filter(|alert| {
+                                                    normalized_body
+                                                        .matches_any_trigger(&alert.words)
+                                                })
+                                                .map(|alert| {
+                                                    let key = alert.sound_key();
+                                                    let volume = s.sound.sound_volume(&key);
+                                                    (key, volume)
+                                                })
+                                                .collect::<Vec<_>>()
+                                        } else {
+                                            Vec::new()
+                                        };
                                         (
                                             pings.ign_mention
                                                 && SoundType::IgnMention.is_enabled(&s.sound),
-                                            pings.custom_chat
-                                                && SoundType::CustomChat.is_enabled(&s.sound),
+                                            custom,
                                         )
                                     })
-                                    .unwrap_or((false, false));
+                                    .unwrap_or((false, Vec::new()));
                                 if mention_ping {
                                     self.emit(UiPayload::Audio(AudioCommand::Play(
                                         SoundType::IgnMention,
                                     )));
                                 }
-                                if custom_ping {
-                                    self.emit(UiPayload::Audio(AudioCommand::Play(
-                                        SoundType::CustomChat,
-                                    )));
+                                for (custom_key, volume) in custom_pings {
+                                    self.emit(UiPayload::Audio(AudioCommand::PlayCustomChat {
+                                        custom_key,
+                                        volume,
+                                    }));
                                 }
                             }
                         }
@@ -3274,7 +3377,7 @@ impl PacketProcessor {
                     self.combat.on_boss_loot(
                         drop.mob_type,
                         drop.player.map_seed,
-                        time_ms as i64,
+                        drop.timestamp,
                         &drop
                             .items
                             .iter()
@@ -3352,16 +3455,28 @@ impl PacketProcessor {
                     }
                 };
 
-                // Read enchant ids from the canonical character cache (must reflect
-                // inventory applied earlier in this same batch).
-                let to_enchants = char_id
-                    .and_then(|cid| self.account_data.characters.item_at_slot(cid, to.slot_id))
-                    .map(|item| item.enchant_ids)
-                    .unwrap_or_default();
-                let from_enchants = char_id
-                    .and_then(|cid| self.account_data.characters.item_at_slot(cid, from.slot_id))
-                    .map(|item| item.enchant_ids)
-                    .unwrap_or_default();
+                // Read enchant data from the canonical character cache (must reflect
+                // inventory applied earlier in this same batch). The packet's item
+                // type stays authoritative for the vault item's id, but the whole
+                // slot breakdown (filled + empty + locked) comes from the cached
+                // character item so empty-but-slotted items keep their rarity.
+                let to_char = char_id
+                    .and_then(|cid| self.account_data.characters.item_at_slot(cid, to.slot_id));
+                let from_char = char_id
+                    .and_then(|cid| self.account_data.characters.item_at_slot(cid, from.slot_id));
+                let vault_item = |item_type: i32,
+                                  char_item: Option<&realmhound_core::vault::CharacterItem>|
+                 -> LiveVaultItem {
+                    match char_item {
+                        Some(c) => LiveVaultItem {
+                            item_id: item_type,
+                            enchant_ids: c.enchant_ids.clone(),
+                            empty_enchant_slots: c.empty_enchant_slots,
+                            locked_enchant_slots: c.locked_enchant_slots,
+                        },
+                        None => LiveVaultItem::new(item_type),
+                    }
+                };
 
                 let storage = self.account_data.get_vault_mut(vault_type);
 
@@ -3375,7 +3490,7 @@ impl PacketProcessor {
                 } else if [chest_id, material_id, gift_id, potion_id]
                     .contains(&Some(from.object_id))
                 {
-                    let new_item = LiveVaultItem::with_enchants(to.item_type, to_enchants);
+                    let new_item = vault_item(to.item_type, to_char.as_ref());
                     if set_item(storage, from.object_id, from.slot_id, new_item) {
                         vault_updated = true;
                     }
@@ -3387,7 +3502,7 @@ impl PacketProcessor {
                     }
                 } else if [chest_id, material_id, gift_id, potion_id].contains(&Some(to.object_id))
                 {
-                    let new_item = LiveVaultItem::with_enchants(from.item_type, from_enchants);
+                    let new_item = vault_item(from.item_type, from_char.as_ref());
                     if set_item(storage, to.object_id, to.slot_id, new_item) {
                         vault_updated = true;
                     }
@@ -5126,8 +5241,8 @@ mod isolation_gate_tests {
 
     /// A deactivation is only ever reported by the character list, and the live
     /// character was skipped entirely by it, so a ritual switched off in-game stuck
-    /// on that character until logout -- the reset of "[RITUAL] live" that issue #64
-    /// introduced. The list may clear the live character (it may not set it: the live
+    /// on that character until logout -- the stuck "[RITUAL] live" state the
+    /// reset introduced. The list may clear the live character (it may not set it: the live
     /// `BloodRitual` stat is fresher for that).
     #[test]
     fn api_account_data_clears_a_deactivated_live_blood_ritual() {
@@ -5220,7 +5335,7 @@ mod isolation_gate_tests {
 
     /// The character list is what makes the Blood Ritual known for characters
     /// that are not the live one -- the live status only ever describes the
-    /// character being played (issue #64). The list can lag behind that status, so
+    /// character being played. The list can lag behind that status, so
     /// the live character must be left to its own `BloodRitual` stat.
     #[test]
     fn api_account_data_seeds_blood_ritual_for_non_live_characters() {
@@ -5298,7 +5413,7 @@ mod isolation_gate_tests {
 
     /// The Crucible marker comes from the live CRUCIBLE stat and from nowhere else:
     /// the character list's own flag is stale (it claims crucible on non-seasonal
-    /// characters -- issue #66), and a Refresh must never revoke a marker the live
+    /// characters), and a Refresh must never revoke a marker the live
     /// stat set. Crucible runs on non-seasonal characters too, so clearing on
     /// `!seasonal` wiped a real marker every time the account data refreshed, which
     /// is what made the Character card pill vanish on Refresh.
@@ -5370,7 +5485,7 @@ mod isolation_gate_tests {
     /// change even while a ritual is active, and the game follows it with the real
     /// id within milliseconds when one is: only silence past the settle window means
     /// "none". Reading the empty spawn as a deactivation made the pill, the
-    /// attribute brackets and the Bonuses line flash on every portal (#64); ignoring
+    /// attribute brackets and the Bonuses line flash on every portal; ignoring
     /// the empty delta left a ritual switched off in-game stuck until Refresh.
     #[test]
     fn blood_ritual_stat_deactivation_clears_and_zone_changes_do_not() {
@@ -5520,6 +5635,355 @@ mod new_selected_tests {
 
     fn settings() -> Arc<RwLock<Settings>> {
         Arc::new(RwLock::new(Settings::default()))
+    }
+
+    #[test]
+    fn maintenance_logs_named_jobs_once_and_retries_without_false_completion() {
+        use realmhound_core::combat::CombatDatabase;
+        use realmhound_core::maintenance::MaintenanceLog;
+
+        let temp = tempfile::tempdir().unwrap();
+        let combat_path = temp.path().join("combat.db");
+        let log_path = temp.path().join("maintenance.log");
+        let mut db = CombatDatabase::open_writer(&combat_path).unwrap();
+        let control = rusqlite::Connection::open(&combat_path).unwrap();
+        control
+            .execute_batch(
+                "CREATE TRIGGER fail_logged_repair BEFORE UPDATE ON historical_repairs
+                 WHEN NEW.repair_id='encounter-grouping-v1'
+                 BEGIN SELECT RAISE(ABORT,'maintenance log test'); END;",
+            )
+            .unwrap();
+        let output = std::fs::File::create(&log_path).unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || output.try_clone().unwrap())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut log = MaintenanceLog::default();
+            for _ in 0..3 {
+                assert!(db.historical_repair_batch_logged(None, &mut log).is_err());
+            }
+            let failed = std::fs::read_to_string(&log_path).unwrap();
+            assert!(!failed.contains("[MAINTENANCE] Completed"));
+            assert_eq!(failed.matches("[MAINTENANCE] Failed;").count(), 1);
+            assert_eq!(failed.matches("[MAINTENANCE] Retrying").count(), 1);
+            control
+                .execute_batch("DROP TRIGGER fail_logged_repair")
+                .unwrap();
+            db.historical_repair_batch_logged(None, &mut log).unwrap();
+            let recovered = std::fs::read_to_string(&log_path).unwrap();
+            assert_eq!(recovered.matches("[MAINTENANCE] Started").count(), 1);
+            assert!(recovered.contains("[MAINTENANCE] Recovered after retry"));
+            assert_eq!(
+                recovered
+                    .lines()
+                    .filter(|line| line.contains("[MAINTENANCE] Completed")
+                        && line.contains("encounter-grouping-v1"))
+                    .count(),
+                1
+            );
+            assert!(recovered.contains("encounter-grouping-v1"));
+            assert!(!recovered.contains("name="));
+            assert!(recovered.contains("elapsed_ms="));
+
+            log.deferred("test-assets", "waiting for game assets");
+            log.deferred("test-assets", "waiting for game assets");
+            log.start("test-assets", 64, 100, true);
+            log.complete("test-assets", 100);
+            log.finish(&Ok(()));
+            let completed = std::fs::read_to_string(&log_path).unwrap();
+            assert_eq!(completed.matches("[MAINTENANCE] Deferred").count(), 1);
+            assert!(completed.contains("[MAINTENANCE] Resumed"));
+            assert!(completed.contains("cursor=64"));
+
+            for _ in 0..32 {
+                db.historical_repair_batch_logged(None, &mut log).unwrap();
+            }
+            let idle = std::fs::read_to_string(&log_path).unwrap();
+            for _ in 0..4 {
+                db.historical_repair_batch_logged(None, &mut log).unwrap();
+            }
+            assert_eq!(std::fs::read_to_string(&log_path).unwrap(), idle);
+        });
+    }
+
+    #[test]
+    fn repaired_history_refreshes_only_the_changed_history() {
+        use super::UiPayload;
+        let mut processor = PacketProcessor::new_for_test(AccountData::new());
+        processor.repaired_combat_dirty = true;
+        processor.publish_repaired_history();
+        assert_eq!(processor.updates.len(), 1);
+        assert!(matches!(
+            processor.updates[0].payload,
+            UiPayload::CombatHistoryChanged
+        ));
+        processor.updates.clear();
+        processor.publish_repaired_history();
+        assert!(processor.updates.is_empty());
+        processor.repaired_loot_dirty = true;
+        processor.publish_repaired_history();
+        assert_eq!(processor.updates.len(), 1);
+        assert!(matches!(
+            processor.updates[0].payload,
+            UiPayload::LootBatchAdded
+        ));
+    }
+
+    #[test]
+    fn legacy_combat_finishes_before_loot_and_snapshot_excludes_new_fights() {
+        let assets = realmhound_core::assets::get_asset_manager();
+        if let Some(dir) = realmhound_core::assets::find_assets_dir() {
+            assets.set_assets_dir(&dir);
+        }
+        if !assets.try_load() {
+            eprintln!("skipping asset-dependent historical repair test");
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let combat = temp.path().join("combat.db");
+        let loot = temp.path().join("loot.db");
+        CombatDatabase::open_writer(&combat)
+            .unwrap()
+            .close()
+            .unwrap();
+        let conn = rusqlite::Connection::open(&combat).unwrap();
+        conn.execute(
+            "INSERT INTO fights(started_at,ended_at,dungeon,map_seed,boss_object_type,boss_name,
+                 boss_max_hp,boss_start_hp,local_object_id,local_char_id,killed)
+             VALUES(0,1000,'The Shatters',77,?1,'Old Queen',100,100,10,1,1)",
+            [realmhound_core::assets::SHATTERS_QUEEN_TYPE],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA user_version=53").unwrap();
+        drop(conn);
+        LootDatabase::open_writer(&loot, None)
+            .unwrap()
+            .close()
+            .unwrap();
+        let conn = rusqlite::Connection::open(&loot).unwrap();
+        conn.execute_batch(
+            "INSERT INTO loot_drops(timestamp,dungeon,map_seed,char_id,char_name,class_id,fame,bag_type,mob_type,mob_name)
+             VALUES(1001,'Synthetic Dungeon',77,1,'Player',768,0,1292,0,'Unknown');
+             INSERT INTO loot_items(drop_id,slot,item_id,item_name) VALUES(1,0,7718,'Mark');
+             PRAGMA user_version=22;"
+        ).unwrap();
+        drop(conn);
+        let mut processor = PacketProcessor::new_selected(
+            settings(),
+            AccountData::new(),
+            AccountDataRepository::for_profile(temp.path().join("account_data.json")),
+            loot.clone(),
+            combat.clone(),
+            None,
+            None,
+        )
+        .unwrap();
+        let conn = rusqlite::Connection::open(&combat).unwrap();
+        conn.execute(
+            "INSERT INTO fights(started_at,ended_at,dungeon,map_seed,boss_object_type,boss_name,
+                 boss_max_hp,boss_start_hp,local_object_id,local_char_id,killed)
+             VALUES(2000,3000,'Other',77,999999,'Later Live Boss',100,100,10,1,1)",
+            [],
+        )
+        .unwrap();
+        let reader = rusqlite::Connection::open(&loot).unwrap();
+        assert_eq!(
+            reader
+                .query_row("SELECT mob_type FROM loot_drops WHERE id=1", [], |r| r
+                    .get::<_, i32>(0))
+                .unwrap(),
+            0
+        );
+        assert!(processor.combat.has_legacy_repairs().unwrap());
+        processor.historical_maintenance_batch().unwrap();
+        assert_eq!(
+            reader
+                .query_row(
+                    "SELECT cursor FROM legacy_loot_repairs WHERE repair_id='loot-023-combat'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        let mut repaired = false;
+        for _ in 0..200 {
+            processor.historical_maintenance_batch().unwrap();
+            let name: String = reader
+                .query_row("SELECT mob_name FROM loot_drops WHERE id=1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            if name != "Unknown" {
+                assert_eq!(name, "The Shattered Queen");
+                repaired = true;
+                break;
+            }
+        }
+        assert!(
+            repaired,
+            "legacy Loot must eventually use the corrected historical fight"
+        );
+        assert_eq!(reader.query_row(
+            "SELECT combat_cutoff FROM legacy_loot_repairs WHERE repair_id='loot-023-combat'",
+            [],|r|r.get::<_,i64>(0)).unwrap(),1);
+    }
+
+    #[test]
+    fn legacy_loot_correlation_uses_deferred_kill_proofs() {
+        let assets = realmhound_core::assets::get_asset_manager();
+        if let Some(dir) = realmhound_core::assets::find_assets_dir() {
+            assets.set_assets_dir(&dir);
+        }
+        if !assets.try_load() {
+            eprintln!("skipping asset-dependent historical repair test");
+            return;
+        }
+        let red = realmhound_core::loot::RED_BEEHEMOTH_OBJECT_TYPE;
+        assert!(assets.bag_attribution_proves_kill(red));
+        for version in [12, 22] {
+            let temp = tempfile::tempdir().unwrap();
+            let combat = temp.path().join("combat.db");
+            let loot = temp.path().join("loot.db");
+            CombatDatabase::open_writer(&combat)
+                .unwrap()
+                .close()
+                .unwrap();
+            let combat_reader = rusqlite::Connection::open(&combat).unwrap();
+            combat_reader.execute(
+                "INSERT INTO fights(started_at,ended_at,dungeon,map_seed,boss_object_type,boss_name,
+                     boss_max_hp,boss_start_hp,local_object_id,local_char_id,killed)
+                 VALUES(1000,2000,'Realm',77,?1,'Red Beehemoth',100,100,10,1,0)",
+                [red],
+            ).unwrap();
+            LootDatabase::open_writer(&loot, None)
+                .unwrap()
+                .close()
+                .unwrap();
+            let reader = rusqlite::Connection::open(&loot).unwrap();
+            reader.execute_batch(
+                "INSERT INTO loot_drops(timestamp,dungeon,map_seed,char_id,char_name,class_id,fame,bag_type,mob_type,mob_name)
+                 VALUES(2002,'Realm',77,1,'Player',768,0,1292,0,'Unknown');
+                 WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<63)
+                 INSERT INTO loot_drops(timestamp,dungeon,map_seed,char_id,char_name,class_id,fame,bag_type,mob_type,mob_name)
+                 SELECT 2002,'Other',900+n,1,'Player',768,0,1280,0,'Unknown' FROM seq;
+                 INSERT INTO loot_drops(timestamp,dungeon,map_seed,char_id,char_name,class_id,fame,bag_type,mob_type,mob_name)
+                 VALUES(2002,'Realm',77,1,'Player',768,0,1292,0,'Unknown');"
+            ).unwrap();
+            reader.execute(
+                "INSERT INTO loot_drops(timestamp,dungeon,map_seed,char_id,char_name,class_id,fame,bag_type,mob_type,mob_name)
+                 VALUES(2001,'Realm',77,1,'Player',768,0,1292,?1,'Red Beehemoth')",
+                [red],
+            ).unwrap();
+            reader
+                .execute_batch(&format!("PRAGMA user_version={version}"))
+                .unwrap();
+            let mut processor = PacketProcessor::new_selected(
+                settings(),
+                AccountData::new(),
+                AccountDataRepository::for_profile(temp.path().join("account_data.json")),
+                loot.clone(),
+                combat.clone(),
+                None,
+                None,
+            )
+            .unwrap();
+            combat_reader.execute(
+                "INSERT INTO fights(started_at,ended_at,dungeon,map_seed,boss_object_type,boss_name,
+                     boss_max_hp,boss_start_hp,local_object_id,local_char_id,killed)
+                 VALUES(1000,2002,'Realm',77,?1,'Blue Beehemoth',100,100,10,1,1)",
+                [realmhound_core::loot::BLUE_BEEHEMOTH_OBJECT_TYPE],
+            ).unwrap();
+            reader.execute_batch(
+                "INSERT INTO loot_drops(timestamp,dungeon,map_seed,char_id,char_name,class_id,fame,bag_type,mob_type,mob_name)
+                 VALUES(2002,'Realm',77,1,'Player',768,0,1292,0,'Unknown');"
+            ).unwrap();
+            assert_eq!(
+                combat_reader
+                    .query_row("SELECT killed FROM fights WHERE id=1", [], |r| r
+                        .get::<_, i32>(0))
+                    .unwrap(),
+                0
+            );
+            let mut finished = false;
+            let mut resumed = false;
+            let checkpoint_sql = "SELECT cursor,cutoff,combat_cutoff,complete
+                FROM legacy_loot_repairs WHERE repair_id='loot-023-combat-final'";
+            for _ in 0..500 {
+                let pending = processor.historical_maintenance_batch().unwrap().1;
+                let checkpoint: (i64, i64, i64, bool) = reader
+                    .query_row(checkpoint_sql, [], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                    })
+                    .unwrap();
+                if !resumed && checkpoint.0 == 64 {
+                    assert_eq!(checkpoint, (64, 66, 1, false));
+                    assert!(processor.combat.loot_completion_repairs_complete().unwrap());
+                    drop(processor);
+                    processor = PacketProcessor::new_selected(
+                        settings(),
+                        AccountData::new(),
+                        AccountDataRepository::for_profile(temp.path().join("account_data.json")),
+                        loot.clone(),
+                        combat.clone(),
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                    let restored: (i64, i64, i64, bool) = reader
+                        .query_row(checkpoint_sql, [], |r| {
+                            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                        })
+                        .unwrap();
+                    assert_eq!(restored, checkpoint);
+                    resumed = true;
+                }
+                if !pending {
+                    finished = true;
+                    break;
+                }
+            }
+            assert!(finished, "maintenance must finish for Loot v{version}");
+            assert!(resumed, "final correlation must resume across batches");
+            assert_eq!(
+                combat_reader
+                    .query_row("SELECT killed FROM fights WHERE id=1", [], |r| r
+                        .get::<_, i32>(0))
+                    .unwrap(),
+                1
+            );
+            let source: (i32, String) = reader
+                .query_row(
+                    "SELECT mob_type,mob_name FROM loot_drops WHERE id=1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                source,
+                (red, "Red Beehemoth".to_string()),
+                "Loot v{version} must use the deferred kill proof, not a later live fight"
+            );
+            assert_eq!(
+                reader
+                    .query_row("SELECT mob_type FROM loot_drops WHERE id=65", [], |r| r
+                        .get::<_, i32>(0))
+                    .unwrap(),
+                red,
+                "the resumed batch must still use the frozen fight cutoff"
+            );
+            assert_eq!(
+                reader
+                    .query_row("SELECT mob_type FROM loot_drops WHERE id=67", [], |r| r
+                        .get::<_, i32>(0))
+                    .unwrap(),
+                0,
+                "later live bags stay outside the historical cutoff"
+            );
+        }
     }
 
     #[test]

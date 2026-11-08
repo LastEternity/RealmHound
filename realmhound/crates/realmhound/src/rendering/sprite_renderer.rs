@@ -236,6 +236,34 @@ impl OwnedUnlocks {
     }
 }
 
+/// Build the enchant-slot buffer a tile/tooltip renderer expects: filled
+/// enchant IDs first, then `-1` for each empty (unlocked) slot and `-2` for
+/// each locked slot, capped at four. Empty-but-slotted items therefore keep
+/// their rarity gem and show `<empty>` in the tooltip.
+pub(crate) fn enchant_slot_buffer(filled: &[u16], empty: u8, locked: u8) -> ([i32; 4], usize) {
+    let mut buf = [0i32; 4];
+    let mut len = 0usize;
+    for &id in filled {
+        if len < 4 {
+            buf[len] = id as i32;
+            len += 1;
+        }
+    }
+    for _ in 0..empty {
+        if len < 4 {
+            buf[len] = -1;
+            len += 1;
+        }
+    }
+    for _ in 0..locked {
+        if len < 4 {
+            buf[len] = -2;
+            len += 1;
+        }
+    }
+    (buf, len)
+}
+
 /// Sprite renderer for drawing item sprites in egui.
 pub struct SpriteRenderer {
     /// Local texture cache
@@ -281,8 +309,9 @@ pub struct SpriteRenderer {
     /// Baked colour-outlined direction-aware sprites (secret-stat glow border).
     /// Keyed by (sprite_id, direction, scale, tex1, tex2, outline_rgb).
     outlined_dir_glow_cache: HashMap<(i32, i32, u32, u32, u32, u32), TextureHandle>,
-    /// Baked outlined embedded icons (tab icons). Keyed by (icon, scale).
-    outlined_embedded_cache: HashMap<(EmbeddedIcon, u32), TextureHandle>,
+    /// Baked outlined embedded icons (tab icons). Keyed by (icon, art width,
+    /// art height) in physical pixels; the baked outline adds 2px.
+    outlined_embedded_cache: HashMap<(EmbeddedIcon, u32, u32), TextureHandle>,
     /// Baked outlined sheet sprites (tab icons referenced by sheet+index). Keyed by (sheet, index, scale).
     outlined_sheet_cache: HashMap<(&'static str, i32, u32), TextureHandle>,
     /// Baked outlined full-cell sprites: like [`Self::outlined_cache`] but the
@@ -306,8 +335,11 @@ pub struct SpriteRenderer {
     /// counts only: the `OWNED` cosmetic/blueprint tag is unrelated and always
     /// shows.
     hide_owned_rarity: bool,
-    /// Account generation the `owned_rarities` map was built from (skip recompute).
-    owned_rarities_generation: u64,
+    /// Epoch the `owned_rarities` map was built from: `(account generation,
+    /// character-view generation, vault-view generation)`. Live character
+    /// inventory changes advance only the character-view generation (they do
+    /// not bump the account generation), so all three must key the cache.
+    owned_rarities_epoch: (u64, u64, u64),
     /// Account unlock state behind the tooltip's `OWNED` tag.
     owned_unlocks: OwnedUnlocks,
     /// Account generation the `owned_unlocks` snapshot was built from.
@@ -372,7 +404,7 @@ impl SpriteRenderer {
             outlined_fit_cache: HashMap::new(),
             owned_rarities: HashMap::new(),
             hide_owned_rarity: false,
-            owned_rarities_generation: u64::MAX,
+            owned_rarities_epoch: (u64::MAX, u64::MAX, u64::MAX),
             owned_unlocks: OwnedUnlocks::default(),
             owned_unlocks_generation: u64::MAX,
             content_offsets: HashMap::new(),
@@ -699,13 +731,21 @@ impl SpriteRenderer {
 
     /// Refresh the owned-item rarity breakdown from account data. Counts every
     /// owned copy of each item by its enchant-slot rarity (0 = Common .. 4 =
-    /// Divine) across all live and dead characters and both vaults. Skips the
-    /// (potentially large) recompute when the account generation is unchanged.
-    pub fn update_owned_rarities(&mut self, account_data: &realmhound_core::vault::AccountData) {
-        if self.owned_rarities_generation == account_data.generation {
+    /// Divine) across all live and dead characters and both vaults.
+    ///
+    /// `epoch` must change whenever any counted collection changes: the account
+    /// generation alone is not enough, because live character inventory updates
+    /// only advance the character-view generation. `vault_view_gen` is included
+    /// so a live vault view refresh also invalidates the map.
+    pub fn update_owned_rarities(
+        &mut self,
+        account_data: &realmhound_core::vault::AccountData,
+        epoch: (u64, u64, u64),
+    ) {
+        if self.owned_rarities_epoch == epoch {
             return;
         }
-        self.owned_rarities_generation = account_data.generation;
+        self.owned_rarities_epoch = epoch;
         self.owned_rarities.clear();
 
         let mut add = |item_id: i32, enchant_count: usize| {
@@ -729,7 +769,7 @@ impl SpriteRenderer {
                 .chain(ch.backpack_ext.iter())
                 .chain(ch.belt.iter())
             {
-                add(item.item_id, item.enchant_count());
+                add(item.item_id, item.total_enchant_slots());
             }
         }
         for vault in [&account_data.regular_vault, &account_data.seasonal_vault] {
@@ -741,7 +781,7 @@ impl SpriteRenderer {
                 .chain(vault.potion_items.iter())
                 .chain(vault.spoils_items.iter())
             {
-                add(item.item_id, item.enchant_count());
+                add(item.item_id, item.total_enchant_slots());
             }
         }
     }
@@ -965,6 +1005,23 @@ impl SpriteRenderer {
         ))
     }
 
+    /// Compute a fractionally scaled, centered rect that fits an embedded icon
+    /// inside `rect` while preserving its aspect ratio.
+    fn embedded_filled_rect(&self, ui: &egui::Ui, icon: EmbeddedIcon, rect: Rect) -> Option<Rect> {
+        let size = self.embedded_icons.get(&icon)?.size();
+        let dpi_scale = ui.ctx().pixels_per_point();
+        let sprite_w = size[0] as f32 / dpi_scale;
+        let sprite_h = size[1] as f32 / dpi_scale;
+        if sprite_w < 1.0 || sprite_h < 1.0 {
+            return None;
+        }
+        let factor = (rect.width() / sprite_w).min(rect.height() / sprite_h);
+        Some(Rect::from_center_size(
+            rect.center(),
+            egui::vec2(sprite_w * factor, sprite_h * factor),
+        ))
+    }
+
     /// Draw an embedded icon (from PNG assets compiled into the binary).
     pub fn draw_embedded_icon(&self, ui: &egui::Ui, icon: EmbeddedIcon, rect: Rect) -> bool {
         let Some(texture) = self.embedded_icons.get(&icon) else {
@@ -975,6 +1032,18 @@ impl SpriteRenderer {
         let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
         ui.painter().image(texture.id(), rect, uv, Color32::WHITE);
         true
+    }
+
+    /// Like [`Self::draw_embedded_icon`] but scales the icon up to fill `rect`
+    /// while preserving its aspect ratio, centered. Unlike
+    /// [`Self::draw_embedded_icon_fitted`] this uses fractional scaling, so a
+    /// small PNG (e.g. the 13x12 Party icon) fills the same box as the integer-
+    /// scaled atlas icons instead of rendering smaller.
+    pub fn draw_embedded_icon_filled(&self, ui: &egui::Ui, icon: EmbeddedIcon, rect: Rect) -> bool {
+        let Some(fitted) = self.embedded_filled_rect(ui, icon, rect) else {
+            return false;
+        };
+        self.draw_embedded_icon(ui, icon, fitted)
     }
 
     /// Like [`Self::draw_embedded_icon`] but scales the icon to fit `rect` while
@@ -1129,6 +1198,9 @@ impl SpriteRenderer {
                 TabIconSprite::Embedded(embedded) => {
                     self.draw_outlined_embedded_icon(ui, embedded, icon_rect)
                 }
+                TabIconSprite::EmbeddedFilled(embedded) => {
+                    self.draw_outlined_embedded_icon_filled(ui, embedded, icon_rect)
+                }
                 TabIconSprite::Character {
                     sprite_id,
                     tex1,
@@ -1192,6 +1264,9 @@ impl SpriteRenderer {
                 self.draw_sprite_by_sheet(ui, sheet, index, rect)
             }
             TabIconSprite::Embedded(embedded) => self.draw_embedded_icon(ui, embedded, rect),
+            TabIconSprite::EmbeddedFilled(embedded) => {
+                self.draw_embedded_icon_filled(ui, embedded, rect)
+            }
             TabIconSprite::Character {
                 sprite_id,
                 tex1,
@@ -2268,6 +2343,46 @@ impl SpriteRenderer {
         self.draw_outlined_embedded_icon_tinted(ui, icon, rect, Color32::WHITE)
     }
 
+    /// Like [`Self::draw_outlined_embedded_icon`] but scales the outlined
+    /// texture fractionally to fill `rect` (preserving aspect ratio). Used by
+    /// [`TabIconSprite::EmbeddedFilled`] so small PNG art doesn't render a size
+    /// step below its neighbouring atlas icons.
+    pub fn draw_outlined_embedded_icon_filled(
+        &mut self,
+        ui: &egui::Ui,
+        icon: EmbeddedIcon,
+        rect: Rect,
+    ) -> bool {
+        let (nw, nh) = match self.embedded_icons.get(&icon) {
+            Some(t) => {
+                let s = t.size();
+                (s[0] as f32, s[1] as f32)
+            }
+            None => return false,
+        };
+        // Bake the art at its final physical size, then outline it, so the
+        // outline is exactly 1 physical pixel instead of being stretched with
+        // the art.
+        let dpi_scale = ui.ctx().pixels_per_point();
+        let raw = ((rect.width() * dpi_scale) / nw).min((rect.height() * dpi_scale) / nh);
+        if raw <= 0.0 {
+            return false;
+        }
+        let tw = ((nw * raw).round() as u32).max(1);
+        let th = ((nh * raw).round() as u32).max(1);
+        if self.ensure_outlined_embedded_cache(ui.ctx(), icon, tw, th) {
+            let texture = self.outlined_embedded_cache.get(&(icon, tw, th)).unwrap();
+            let draw_rect = Self::centered_rect_for_texture(ui, texture, rect, egui::Vec2::ZERO);
+            let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+            ui.painter()
+                .image(texture.id(), draw_rect, uv, Color32::WHITE);
+            count_draw_call();
+            count_outlined_sprite();
+            return true;
+        }
+        false
+    }
+
     /// Like [`Self::draw_outlined_embedded_icon`] but multiplies the icon by
     /// `tint`, so callers (e.g. dimmed mission objectives) can grey it out.
     pub fn draw_outlined_embedded_icon_tinted(
@@ -2299,8 +2414,10 @@ impl SpriteRenderer {
         if scale == 0 {
             return false;
         }
-        if self.ensure_outlined_embedded_cache(ui.ctx(), icon, scale) {
-            let texture = self.outlined_embedded_cache.get(&(icon, scale)).unwrap();
+        let tw = nw as u32 * scale;
+        let th = nh as u32 * scale;
+        if self.ensure_outlined_embedded_cache(ui.ctx(), icon, tw, th) {
+            let texture = self.outlined_embedded_cache.get(&(icon, tw, th)).unwrap();
             let draw_rect = Self::centered_rect_for_texture(ui, texture, rect, egui::Vec2::ZERO);
             let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
             ui.painter().image(texture.id(), draw_rect, uv, tint);
@@ -2311,15 +2428,21 @@ impl SpriteRenderer {
         false
     }
 
+    /// Bake an embedded icon's outline at an exact art pixel size, so the
+    /// outline stays a crisp 1 physical pixel after any fractional upscale.
     fn ensure_outlined_embedded_cache(
         &mut self,
         ctx: &egui::Context,
         icon: EmbeddedIcon,
-        scale: u32,
+        width: u32,
+        height: u32,
     ) -> bool {
-        let key = (icon, scale);
+        let key = (icon, width, height);
         if self.outlined_embedded_cache.contains_key(&key) {
             return true;
+        }
+        if width == 0 || height == 0 {
+            return false;
         }
         let Ok(image) = image::load_from_memory(icon.bytes()) else {
             return false;
@@ -2328,19 +2451,20 @@ impl SpriteRenderer {
         if src.width() == 0 || src.height() == 0 {
             return false;
         }
-        let scaled = image::imageops::resize(
-            &src,
-            src.width() * scale,
-            src.height() * scale,
-            image::imageops::FilterType::Nearest,
-        );
+        let scaled =
+            image::imageops::resize(&src, width, height, image::imageops::FilterType::Nearest);
         let out = Self::bake_outline(&scaled);
         let color_image = ColorImage::from_rgba_unmultiplied(
             [out.width() as usize, out.height() as usize],
             out.as_raw(),
         );
         let texture = ctx.load_texture(
-            format!("outlined_embedded_{}_{}x", icon.texture_name(), scale),
+            format!(
+                "outlined_embedded_{}_{}x{}",
+                icon.texture_name(),
+                width,
+                height
+            ),
             color_image,
             TextureOptions::NEAREST,
         );
@@ -5276,7 +5400,7 @@ impl SpriteRenderer {
         const LEFT_PAD: f32 = 4.0;
         const ICON: f32 = 16.0;
         const GAP1: f32 = 4.0; // icon -> text
-        const GAP2: f32 = 6.0; // text -> ✕
+        const GAP2: f32 = 6.0; // text -> ×
         const X_W: f32 = 10.0;
         const RIGHT_PAD: f32 = 6.0;
 
@@ -5335,7 +5459,7 @@ impl SpriteRenderer {
         ui.painter().text(
             x_center,
             egui::Align2::CENTER_CENTER,
-            "\u{2715}",
+            "\u{00d7}",
             font,
             x_color,
         );
@@ -5415,7 +5539,7 @@ impl SpriteRenderer {
         ui.painter().text(
             x_center,
             egui::Align2::CENTER_CENTER,
-            "\u{2715}",
+            "\u{00d7}",
             font,
             x_color,
         );
@@ -5541,6 +5665,39 @@ mod tests {
         account_data.bump_generation();
         renderer.update_owned_unlocks(&account_data);
         assert!(renderer.owned_unlocks.wardrobe.contains(&64979));
+    }
+
+    #[test]
+    fn owned_rarities_rebuild_when_character_view_changes() {
+        use realmhound_core::api::character::EnchantSlots;
+        use realmhound_core::vault::{AccountData, CachedCharacter, CharacterItem};
+
+        let item = CharacterItem::with_enchant_slots(
+            1228,
+            EnchantSlots {
+                filled: Vec::new(),
+                empty: 1,
+                locked: 0,
+            },
+        );
+        let mut account_data = AccountData::default();
+        account_data.characters.characters.push(CachedCharacter {
+            char_id: 1,
+            equipment: vec![item],
+            ..Default::default()
+        });
+
+        let mut renderer = SpriteRenderer::new();
+        let account_gen = account_data.generation;
+        renderer.update_owned_rarities(&account_data, (account_gen, 1, 1));
+        assert_eq!(renderer.owned_rarities[&1228][1], 1);
+
+        // A live inventory update removes the item but only advances the
+        // character-view generation; the account generation is unchanged. The
+        // map must still rebuild or the count stays stuck.
+        account_data.characters.characters[0].equipment.clear();
+        renderer.update_owned_rarities(&account_data, (account_gen, 2, 1));
+        assert_eq!(renderer.owned_rarities.get(&1228).map_or(0, |c| c[1]), 0);
     }
 
     #[test]

@@ -53,6 +53,9 @@ pub struct CombatManager {
     /// view only polls the fight count, so the processor drains these to tell it
     /// to re-read its summaries.
     pending_history_changes: Vec<FightSelection>,
+    loot_path: Option<std::path::PathBuf>,
+    totals_sync_cursor: Option<i32>,
+    maintenance_log: crate::maintenance::MaintenanceLog,
 }
 
 /// Tracks the current dungeon run so its elapsed time can be accumulated into
@@ -89,22 +92,23 @@ impl CombatManager {
             pending_loot_completions: std::collections::HashSet::new(),
             pending_kill_proofs: std::collections::HashSet::new(),
             pending_history_changes: Vec::new(),
+            loot_path: None,
+            totals_sync_cursor: Some(i32::MIN),
+            maintenance_log: crate::maintenance::MaintenanceLog::default(),
         }
     }
 
     /// Open (or create) the combat database for persistence at an explicit path.
-    /// `loot_path` pairs it with the loot-history DB so loot-correlating
-    /// migrations (the Legacy Lair of Draconis completion backfill) can read it.
+    /// `loot_path` pairs it with the loot-history DB for deferred completion
+    /// repairs.
     /// Logs and continues without persistence on failure.
     pub fn open_database(&mut self, path: &std::path::Path, loot_path: Option<&std::path::Path>) {
         match CombatDatabase::open_writer_with_loot(path, loot_path) {
             Ok(db) => {
+                self.maintenance_log = crate::maintenance::MaintenanceLog::default();
                 self.database = Some(db);
+                self.loot_path = loot_path.map(std::path::Path::to_path_buf);
                 tracing::info!("[COMBAT] Combat history database opened");
-                // First reconciliation backfills every historical qualifying card
-                // into the award ledger and buffers the increments.
-                self.reconcile_awards();
-                self.reconcile_close_calls();
             }
             Err(e) => {
                 tracing::error!("[COMBAT] Failed to open combat database: {}", e);
@@ -116,18 +120,68 @@ impl CombatManager {
     /// degrading to in-memory. Selected-profile startup opens the combat writer
     /// before the loot writer (the loot backfill consults the combat DB) and
     /// must not silently continue without persistence. `loot_path` pairs it with
-    /// the loot-history DB for loot-correlating migrations.
+    /// the loot-history DB for deferred completion repairs.
     pub fn open_database_strict(
         &mut self,
         path: &std::path::Path,
         loot_path: Option<&std::path::Path>,
     ) -> Result<(), rusqlite::Error> {
         let db = CombatDatabase::open_writer_with_loot(path, loot_path)?;
+        self.maintenance_log = crate::maintenance::MaintenanceLog::default();
         self.database = Some(db);
+        self.loot_path = loot_path.map(std::path::Path::to_path_buf);
         tracing::info!("[COMBAT] Combat history database opened (strict)");
-        self.reconcile_awards();
-        self.reconcile_close_calls();
         Ok(())
+    }
+
+    /// Snapshot before capture starts so legacy loot cannot borrow new fights.
+    pub fn historical_fight_cutoff(&self) -> Result<Option<i64>, rusqlite::Error> {
+        self.database
+            .as_ref()
+            .map(CombatDatabase::historical_fight_cutoff)
+            .transpose()
+    }
+
+    pub fn has_legacy_repairs(&self) -> Result<bool, rusqlite::Error> {
+        match self.database.as_ref() {
+            Some(db) => db.has_legacy_repairs(),
+            None => Ok(false),
+        }
+    }
+
+    pub fn loot_completion_repairs_complete(&self) -> Result<bool, rusqlite::Error> {
+        match self.database.as_ref() {
+            Some(db) => db.loot_completion_repairs_complete(),
+            None => Ok(false),
+        }
+    }
+
+    /// Run only after the UI is usable, between capture batches.
+    pub fn historical_maintenance_batch(
+        &mut self,
+        char_ids: &[i32],
+    ) -> Result<(bool, bool), rusqlite::Error> {
+        let Some(db) = self.database.as_mut() else {
+            return Ok((false, false));
+        };
+        let mut batch = db
+            .historical_repair_batch_logged(self.loot_path.as_deref(), &mut self.maintenance_log)?;
+        self.pending_stat_awards.extend(batch.stat_awards);
+        self.pending_close_call_totals.extend(batch.close_calls);
+        if !batch.pending {
+            if let Some(cursor) = self.totals_sync_cursor {
+                let mut ids: Vec<_> = char_ids.iter().copied().filter(|id| *id > cursor).collect();
+                ids.sort_unstable();
+                ids.dedup();
+                ids.truncate(16);
+                let restored = db.persisted_combat_totals(&ids)?;
+                self.pending_stat_awards.extend(restored.stat_awards);
+                self.pending_close_call_totals.extend(restored.close_calls);
+                self.totals_sync_cursor = ids.last().copied();
+                batch.pending = self.totals_sync_cursor.is_some();
+            }
+        }
+        Ok((batch.history_changed, batch.pending))
     }
 
     /// Checkpoint and close the combat database. No-op in in-memory mode.
@@ -135,21 +189,6 @@ impl CombatManager {
         match self.database.take() {
             Some(db) => db.close(),
             None => Ok(()),
-        }
-    }
-
-    /// Reconcile the award ledger and stage the authoritative per-character
-    /// lifetime totals for the processor to apply to the character cache.
-    fn reconcile_awards(&mut self) {
-        if let Some(db) = self.database.as_mut() {
-            match db.reconcile_stat_awards() {
-                Ok(totals) => {
-                    // Preserve targeted zeroes already staged for a previous
-                    // owner that no longer has a row in the ledger.
-                    self.pending_stat_awards.extend(totals);
-                }
-                Err(e) => tracing::error!("[COMBAT] Failed to reconcile stat awards: {}", e),
-            }
         }
     }
 
@@ -163,19 +202,12 @@ impl CombatManager {
         let Some(db) = self.database.as_mut() else {
             return;
         };
-        let totals = match db.reconcile_stat_awards_for_selections(selections) {
-            Ok(totals) => Ok(totals),
-            Err(e) => {
-                tracing::error!(
-                    "[COMBAT] Failed to reconcile changed stat awards: {}; retrying full reconciliation",
-                    e
-                );
-                db.reconcile_stat_awards()
-            }
-        };
-        match totals {
+        match db.reconcile_stat_awards_for_selections(selections) {
             Ok(totals) => self.pending_stat_awards.extend(totals),
-            Err(e) => tracing::error!("[COMBAT] Failed to reconcile stat awards: {}", e),
+            Err(e) => tracing::error!(
+                "[COMBAT] Failed to reconcile changed stat awards; queued for retry: {}",
+                e
+            ),
         }
     }
 
@@ -267,9 +299,18 @@ impl CombatManager {
         self.tracker.shot_damage_bonus()
     }
 
-    /// Entered a new map.
-    pub fn on_map_change(&mut self, map_name: &str, map_seed: i32, time_ms: i64) {
-        let finished = self.tracker.on_map_change(map_name, map_seed, time_ms);
+    /// Entered a new map with its dungeon modifier tokens (empty outside modded
+    /// dungeons).
+    pub fn on_map_change(
+        &mut self,
+        map_name: &str,
+        map_seed: i32,
+        time_ms: i64,
+        modifiers: &[String],
+    ) {
+        let finished = self
+            .tracker
+            .on_map_change(map_name, map_seed, time_ms, modifiers);
         self.persist(finished);
         // The escaped segment fights of a loot-completed realm event persist here
         // (on leaving the realm), so apply any buffered loot completions before
@@ -756,6 +797,33 @@ mod tests {
     use super::*;
     use crate::combat::ParticipantEndStatus;
 
+    #[test]
+    fn loot_completion_requires_all_persisted_kill_repairs() {
+        let mut manager = CombatManager::new();
+        assert!(!manager.loot_completion_repairs_complete().unwrap());
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("combat.db");
+        manager.open_database_strict(&path, None).unwrap();
+        assert!(!manager.loot_completion_repairs_complete().unwrap());
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(
+            "INSERT INTO historical_repairs(repair_id,cutoff,complete) VALUES
+             ('curated-loot-completion-v1',0,1),
+             ('asset-loot-completion-v1',0,1),
+             ('ivory-completion-v1',0,0);",
+        )
+        .unwrap();
+        assert!(!manager.loot_completion_repairs_complete().unwrap());
+        conn.execute(
+            "UPDATE historical_repairs SET complete=1 WHERE repair_id='ivory-completion-v1'",
+            [],
+        )
+        .unwrap();
+        assert!(manager.loot_completion_repairs_complete().unwrap());
+        manager.close().unwrap();
+        assert!(!manager.loot_completion_repairs_complete().unwrap());
+    }
+
     fn fight(dungeon: &str, boss: &str, solo: bool) -> CompletedFight {
         let mut participants = vec![FightParticipant {
             object_id: 1,
@@ -820,6 +888,7 @@ mod tests {
             ended_at: 1000,
             dungeon: dungeon.to_string(),
             dungeon_entered_at: None,
+            dungeon_modifiers: Vec::new(),
             map_seed: 1,
             boss_object_type: 100,
             boss_name: boss.to_string(),
@@ -1137,7 +1206,7 @@ mod tests {
 
         // The next map change retries it, and the fight completes.
         m.database = Some(writer);
-        m.on_map_change("Nexus", 0, 90_000);
+        m.on_map_change("Nexus", 0, 90_000, &[]);
 
         let fights = m.database.as_ref().unwrap().recent_fights(10).unwrap();
         assert_eq!(fights.len(), 1);
@@ -1153,10 +1222,10 @@ mod tests {
     fn dungeon_timer_counts_entry_to_boss_death_on_completion() {
         let mut m = CombatManager::new();
         m.database = Some(super::super::database::CombatDatabase::open_in_memory().unwrap());
-        m.on_map_change("The Shatters", 42, 1_000);
+        m.on_map_change("The Shatters", 42, 1_000, &[]);
         m.persist(vec![killed_boss("The Shatters", 1_000, 5_000)]);
         // Player lingers, then leaves: post-kill time is not counted.
-        m.on_map_change("Nexus", 0, 9_000);
+        m.on_map_change("Nexus", 0, 9_000, &[]);
 
         let totals = m.database.as_ref().unwrap().dungeon_time_totals().unwrap();
         assert_eq!(totals.len(), 1);
@@ -1169,7 +1238,7 @@ mod tests {
     fn dungeon_timer_counts_entry_to_exit_when_boss_not_killed() {
         let mut m = CombatManager::new();
         m.database = Some(super::super::database::CombatDatabase::open_in_memory().unwrap());
-        m.on_map_change("The Nest", 7, 1_000);
+        m.on_map_change("The Nest", 7, 1_000, &[]);
         // No boss kill; player disconnects mid-run.
         m.on_disconnect(4_000);
 
@@ -1184,8 +1253,8 @@ mod tests {
     fn dungeon_timer_ignores_realm_and_hubs() {
         let mut m = CombatManager::new();
         m.database = Some(super::super::database::CombatDatabase::open_in_memory().unwrap());
-        m.on_map_change("{s.rotmg}", 1, 1_000); // normalizes to Realm
-        m.on_map_change("Nexus", 0, 9_000);
+        m.on_map_change("{s.rotmg}", 1, 1_000, &[]); // normalizes to Realm
+        m.on_map_change("Nexus", 0, 9_000, &[]);
         assert!(m
             .database
             .as_ref()
@@ -1199,10 +1268,10 @@ mod tests {
     fn dungeon_timer_flushes_on_local_death_before_boss_kill() {
         let mut m = CombatManager::new();
         m.database = Some(super::super::database::CombatDatabase::open_in_memory().unwrap());
-        m.on_map_change("The Shatters", 42, 1_000);
+        m.on_map_change("The Shatters", 42, 1_000, &[]);
         // Player dies at t=3000 without killing the boss; later nexus is a no-op.
         m.on_local_death(7, 0, 3_000);
-        m.on_map_change("Nexus", 0, 20_000);
+        m.on_map_change("Nexus", 0, 20_000, &[]);
 
         let totals = m.database.as_ref().unwrap().dungeon_time_totals().unwrap();
         assert_eq!(totals.len(), 1);
@@ -1215,13 +1284,13 @@ mod tests {
     fn flush_records_dungeon_freeze_with_seed_and_committed_elapsed() {
         let mut m = CombatManager::new();
         m.database = Some(super::super::database::CombatDatabase::open_in_memory().unwrap());
-        m.on_map_change("The Shatters", 42, 1_000);
+        m.on_map_change("The Shatters", 42, 1_000, &[]);
         m.persist(vec![killed_boss("The Shatters", 1_000, 5_000)]);
         // No freeze until the run ends.
         assert_eq!(m.take_dungeon_freeze(), None);
         // Leaving to the nexus flushes: freeze carries the seed and the committed
         // entry -> boss-death elapsed (post-kill lingering excluded).
-        m.on_map_change("Nexus", 0, 9_000);
+        m.on_map_change("Nexus", 0, 9_000, &[]);
         assert_eq!(m.take_dungeon_freeze(), Some((42, 4_000)));
         // Drained once.
         assert_eq!(m.take_dungeon_freeze(), None);

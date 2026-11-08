@@ -72,6 +72,36 @@ mod test_support {
 
 use app::{RealmHoundApp, PKG_NAME, VERSION};
 
+/// Windows keeps the empty icon so eframe does not blur its multi-size .ico and
+/// macOS uses the bundle icon, so only Linux decodes it for the window.
+fn window_icon() -> egui::IconData {
+    #[cfg(target_os = "linux")]
+    {
+        const ICO: &[u8] = include_bytes!("../assets/icon.ico");
+        if let Ok(image) = image::load_from_memory(ICO) {
+            let image = image.into_rgba8();
+            let (width, height) = image.dimensions();
+            return egui::IconData {
+                rgba: image.into_raw(),
+                width,
+                height,
+            };
+        }
+    }
+    egui::IconData::default()
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod window_icon_tests {
+    #[test]
+    fn packaged_ico_decodes_to_an_icon() {
+        let icon = super::window_icon();
+
+        assert_eq!((icon.width, icon.height), (64, 64));
+        assert_eq!(icon.rgba.len(), 64 * 64 * 4);
+    }
+}
+
 fn main() -> Result<()> {
     // A relaunch replacement waits (bounded) for the previous instance to exit
     // before contending for the single-instance claim or the profile lock.
@@ -121,11 +151,8 @@ fn main() -> Result<()> {
         .with_inner_size(window_size)
         .with_min_inner_size([800.0, 600.0])
         .with_title("RealmHound")
-        // Pass an explicit empty icon so eframe skips its runtime WM_SETICON path
-        // (which scales a single bitmap to system-metric sizes and blurs on high-DPI
-        // taskbars). Windows then uses the crisp multi-size .ico embedded as a
-        // resource by build.rs, picking the correct frame per DPI.
-        .with_icon(egui::IconData::default());
+        .with_app_id("realmhound")
+        .with_icon(window_icon());
 
     if let Some((x, y)) = window_pos {
         #[cfg(windows)]
@@ -853,23 +880,28 @@ impl BoundedApp {
 
     fn discovery(discovery: DiscoveryStartup) -> Self {
         let interfaces = realmhound_core::capture::NetworkInterface::list_all();
-        let (capture_handle, candidate_rx) = match interfaces {
+        let (capture_handle, candidate_rx, capture_error) = match interfaces {
             Ok(ref ifaces) if !ifaces.is_empty() => {
                 match discovery::start_discovery_capture(ifaces) {
-                    Ok((handle, rx)) => (Some(handle), Some(rx)),
+                    Ok((handle, rx)) => (Some(handle), Some(rx), None),
                     Err(e) => {
                         tracing::warn!("[DISCOVERY] Failed to start capture: {e}");
-                        (None, None)
+                        let visible_error = cfg!(target_os = "linux").then_some(e);
+                        (None, None, visible_error)
                     }
                 }
             }
             Ok(_) => {
                 tracing::warn!("[DISCOVERY] No network interfaces found");
-                (None, None)
+                let visible_error =
+                    cfg!(target_os = "linux").then(|| "No network interfaces found".to_string());
+                (None, None, visible_error)
             }
             Err(e) => {
                 tracing::warn!("[DISCOVERY] Failed to list interfaces: {e}");
-                (None, None)
+                let visible_error =
+                    cfg!(target_os = "linux").then(|| format!("Failed to list interfaces: {e}"));
+                (None, None, visible_error)
             }
         };
 
@@ -885,7 +917,7 @@ impl BoundedApp {
             candidate_rx,
             candidates: Vec::new(),
             selected_idx: None,
-            action_error: None,
+            action_error: capture_error,
             committed: false,
         }
     }
@@ -1479,6 +1511,16 @@ fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
 
 /// Get the directory for log files.
 fn get_log_directory() -> std::path::PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        let base = std::env::var_os("XDG_STATE_HOME")
+            .filter(|value| std::path::Path::new(value).is_absolute())
+            .map(std::path::PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|home| home.join(".local/state")));
+        if let Some(base) = base {
+            return base.join("RealmHound/logs");
+        }
+    }
     if let Some(data_dir) = dirs::data_local_dir() {
         data_dir.join("RealmHound").join("logs")
     } else {

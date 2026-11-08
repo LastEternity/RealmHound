@@ -138,6 +138,7 @@ pub enum ScalingStat {
     Vitality,
     Speed,
     MaxMp,
+    MaxHp,
 }
 
 impl ScalingStat {
@@ -149,7 +150,11 @@ impl ScalingStat {
             "DEX" | "DEXTERITY" => Some(Self::Dexterity),
             "VIT" | "VITALITY" => Some(Self::Vitality),
             "SPD" | "SPEED" => Some(Self::Speed),
-            "MAXMP" | "MAXMANA" => Some(Self::MaxMp),
+            "MAXMP" | "MAXMANA" | "MP" => Some(Self::MaxMp),
+            // "MAHMP" is not a typo here: it is what five items in the live
+            // game data actually declare, and dropping it silently zeroed their
+            // scaling.
+            "MAXHP" | "MAX_HP" | "HP" | "MAHMP" => Some(Self::MaxHp),
             _ => None,
         }
     }
@@ -164,6 +169,7 @@ impl ScalingStat {
             Self::Vitality => "VIT",
             Self::Speed => "SPD",
             Self::MaxMp => "MP",
+            Self::MaxHp => "HP",
         }
     }
 }
@@ -924,6 +930,24 @@ pub struct ShurikenEffect {
     pub stat_mod_damage: f32,
 }
 
+impl ShurikenEffect {
+    fn sb(&self, s: i32) -> f32 {
+        (s as f32 - self.stat_mod_scaling_min).max(0.0)
+    }
+    /// Minimum per-shot damage at scaling stat `s`.
+    pub fn min_for(&self, s: i32) -> i32 {
+        (self.min_damage + self.stat_mod_damage * self.sb(s))
+            .round()
+            .max(0.0) as i32
+    }
+    /// Maximum per-shot damage at scaling stat `s`.
+    pub fn max_for(&self, s: i32) -> i32 {
+        (self.max_damage + self.stat_mod_damage * self.sb(s))
+            .round()
+            .max(0.0) as i32
+    }
+}
+
 /// A hex-stack-gated condition duration override from `OnDetonateHexActivate
 /// ApplyCondition`. When a `DetonateHex` consumes at least `min_hex` stacks,
 /// this condition is applied for `duration` seconds (overriding the base
@@ -1245,6 +1269,14 @@ pub struct ObjectList {
     /// projectile 0) need this mapping to resolve their damage. Only weapons
     /// whose subattack list is present and non-trivial appear.
     subattack_projectiles: HashMap<i32, Vec<i32>>,
+    /// Items that declare an `OnPlayerShootActivate` proc, i.e. effects that fire
+    /// alongside every weapon shot rather than on activation (Tome of Holy
+    /// Furor's Holy Barrage, a cloak's Lethal Strike side procs). Their shots
+    /// belong to the weapon they fired alongside, not to an ability activation.
+    on_shoot_proc_items: std::collections::HashSet<i32>,
+    /// Object types whose HP the game keeps off zero (`<AlwaysPositiveHealth />`).
+    /// Their HP bar refills mid-fight with no heal behind it.
+    always_positive_health_types: std::collections::HashSet<i32>,
     /// Map from a summoned creature's object type to the items that spawn it, from
     /// every item's <Activate> / On*Activate summon effect. One creature can
     /// have several sources (base + (SB) or shiny variants of one item, or a
@@ -1269,6 +1301,8 @@ impl ObjectList {
             ability_effects: HashMap::new(),
             stat_relatives: HashMap::new(),
             subattack_projectiles: HashMap::new(),
+            on_shoot_proc_items: std::collections::HashSet::new(),
+            always_positive_health_types: std::collections::HashSet::new(),
             summon_sources: HashMap::new(),
             summon_names: HashMap::new(),
         }
@@ -1418,6 +1452,8 @@ impl ObjectList {
             ability_effects: HashMap::new(),
             stat_relatives: HashMap::new(),
             subattack_projectiles: HashMap::new(),
+            on_shoot_proc_items: std::collections::HashSet::new(),
+            always_positive_health_types: std::collections::HashSet::new(),
             summon_sources: HashMap::new(),
             summon_names: HashMap::new(),
         })
@@ -1821,6 +1857,89 @@ impl ObjectList {
             .unwrap_or(&[])
     }
 
+    /// Whether an object declares an `OnPlayerShootActivate` proc: an effect
+    /// that fires alongside weapon shots rather than on activation (a tome's
+    /// barrage, a cloak's Lethal Strike procs).
+    pub fn has_on_shoot_proc(&self, id: i32) -> bool {
+        self.on_shoot_proc_items.contains(&id)
+    }
+
+    /// Whether the game keeps this object's HP number off zero
+    /// (`<AlwaysPositiveHealth />`).
+    pub fn always_positive_health(&self, id: i32) -> bool {
+        self.always_positive_health_types.contains(&id)
+    }
+
+    /// Index every object the game marks `<AlwaysPositiveHealth />`.
+    ///
+    /// The tag lives in the per-dungeon enemy catalogs (`heroes2.xml`,
+    /// `theShattersObjects.xml`, ...), which are never merged into the object
+    /// list, so it cannot ride along with the equipment merge. Those catalogs are
+    /// ~10 MB together, so each file is read once and skipped outright unless it
+    /// contains the tag at all, and the parse only records object types.
+    ///
+    /// It matters for damage accounting: an `<AlwaysPositiveHealth />` boss keeps
+    /// its HP number positive and refills it mid-fight without being healed (the
+    /// realm's Artificial Sprite God snaps from 12,775 back to 18,500), and a rise
+    /// counted as healing inflates the fight's damage pool above what was dealt.
+    pub fn index_always_positive_health(&mut self, xml_dir: &std::path::Path) -> usize {
+        use quick_xml::events::Event;
+        use quick_xml::Reader;
+
+        let entries = match std::fs::read_dir(xml_dir) {
+            Ok(entries) => entries,
+            Err(_) => return 0,
+        };
+        let mut found = 0usize;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("xml") {
+                continue;
+            }
+            let content = match std::fs::read_to_string(&path) {
+                Ok(content) => content,
+                Err(_) => continue,
+            };
+            if !content.contains("<AlwaysPositiveHealth") {
+                continue;
+            }
+            let mut reader = Reader::from_str(&content);
+            reader.config_mut().trim_text(true);
+            let mut buf = Vec::new();
+            let mut current: Option<i32> = None;
+            loop {
+                match reader.read_event_into(&mut buf) {
+                    Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => match e.name().as_ref() {
+                        b"Object" => {
+                            current = e
+                                .attributes()
+                                .flatten()
+                                .find(|a| a.key.as_ref() == b"type")
+                                .and_then(|a| parse_hex_type(&String::from_utf8_lossy(&a.value)));
+                        }
+                        b"AlwaysPositiveHealth" => {
+                            if let Some(id) = current {
+                                if self.always_positive_health_types.insert(id) {
+                                    found += 1;
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
+                    Ok(Event::End(ref e)) => {
+                        if e.name().as_ref() == b"Object" {
+                            current = None;
+                        }
+                    }
+                    Ok(Event::Eof) | Err(_) => break,
+                    _ => {}
+                }
+                buf.clear();
+            }
+        }
+        found
+    }
+
     /// Resolve a weapon's `PlayerShoot.projectileId` to a `<Projectile>` index.
     ///
     /// The client reports the *subattack* index, which for most weapons equals
@@ -2099,6 +2218,9 @@ impl ObjectList {
         // Count of OnPlayerShootActivate BulletCreate entries with
         // requiredConditions="LethalStrike" on the current object.
         let mut ls_extra_shots: i32 = 0;
+        // Items that declare an OnPlayerShootActivate proc, collected here and
+        // merged into the list at the end of the parse.
+        let mut on_shoot_proc: std::collections::HashSet<i32> = std::collections::HashSet::new();
         // Deferred ShurikenAbility attrs, resolved at Object end once
         // pending_proj is known. At most one per item.
         let mut pending_shuriken: Option<HashMap<String, String>> = None;
@@ -2279,6 +2401,9 @@ impl ObjectList {
                                 a.key.as_ref() == b"requiredConditions"
                                     && a.value.as_ref() == b"LethalStrike"
                             });
+                            if let Some(tid) = current_type_id {
+                                on_shoot_proc.insert(tid);
+                            }
                             in_on_player_shoot = true;
                         }
                         _ => {}
@@ -2737,7 +2862,10 @@ impl ObjectList {
             buf.clear();
         }
 
-        self.blueprint_unlock = unlock_map;
+        // Extend rather than replace: equipment catalogs are merged in
+        // sequence (equip.xml, equip_lo.xml, equip_design.xml), and replacing
+        // here would drop every blueprint/ability parsed from earlier files.
+        self.blueprint_unlock.extend(unlock_map);
         // Extend rather than replace: pet stones are split across equip.xml and
         // pets.xml, and the latter is merged by `merge_pet_skin_unlocks`.
         self.pet_skin_unlock.extend(pet_skin_map);
@@ -2873,7 +3001,10 @@ impl ObjectList {
                 }));
         }
 
-        self.ability_effects = ability_map;
+        // Extend rather than replace: later supplemental catalogs must not wipe
+        // the ability data parsed from equip.xml.
+        self.ability_effects.extend(ability_map);
+        self.on_shoot_proc_items.extend(on_shoot_proc);
         Ok(merged_count)
     }
 
@@ -3618,6 +3749,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_scaling_stat_the_game_data_uses_parses() {
+        // The eight RotMG stats the live `<Activate>` elements scale off. `MAHMP`
+        // is not a typo on this side: Kaiju Skull declares it, and dropping the
+        // name silently zeroed the summon's bonus.
+        for (name, want) in [
+            ("WIS", ScalingStat::Wisdom),
+            ("ATT", ScalingStat::Attack),
+            ("DEF", ScalingStat::Defense),
+            ("DEX", ScalingStat::Dexterity),
+            ("VIT", ScalingStat::Vitality),
+            ("SPD", ScalingStat::Speed),
+            ("MAXMP", ScalingStat::MaxMp),
+            ("MAXHP", ScalingStat::MaxHp),
+            ("HP", ScalingStat::MaxHp),
+            ("MAHMP", ScalingStat::MaxHp),
+        ] {
+            assert_eq!(ScalingStat::parse(name), Some(want), "{name} must parse");
+        }
+        assert_eq!(ScalingStat::parse("NOPE"), None);
+    }
+
+    #[test]
+    fn a_shuriken_scales_its_damage_off_its_stat() {
+        let sh = ShurikenEffect {
+            min_damage: 400.0,
+            max_damage: 500.0,
+            num_projectiles: 1,
+            armor_piercing: false,
+            scaling_stat: Some(ScalingStat::Dexterity),
+            stat_mod_scaling_min: 50.0,
+            stat_mod_damage: 4.0,
+        };
+        assert_eq!((sh.min_for(50), sh.max_for(50)), (400, 500), "at the floor");
+        assert_eq!((sh.min_for(80), sh.max_for(80)), (520, 620), "+4 per point");
+        assert_eq!(
+            (sh.min_for(20), sh.max_for(20)),
+            (400, 500),
+            "below the floor clamps"
+        );
+    }
+
+    #[test]
     fn test_parse_object_line() {
         let line = "2827;Sword of the Colossus;Equipment;Weapon;1,200,275,1;0,lofiObj5,;UT;SwordOfTheColossus";
         let asset = ObjectList::parse_object_line(line).unwrap();
@@ -4194,6 +4367,56 @@ mod tests {
         assert_eq!(list.blueprint_unlocked_id(200), Some(100));
         // A non-blueprint item's Shoot activate must not create a mapping.
         assert_eq!(list.blueprint_unlocked_id(100), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn later_equipment_catalogs_extend_blueprints_and_abilities() {
+        // Supplemental catalogs are merged after equip.xml. Their local maps
+        // must extend the catalog rather than replace it, or every blueprint
+        // and ability parsed from equip.xml disappears.
+        let mut list = ObjectList::new();
+        let dir =
+            std::env::temp_dir().join(format!("rh_catalog_extend_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let base = dir.join("equip.xml");
+        std::fs::write(
+            &base,
+            r#"<Objects>
+  <Object type="0x00c8" id="Base Blueprint">
+    <Class>Equipment</Class>
+    <Activate id="Divinity">UnlockForgeBlueprint</Activate>
+  </Object>
+  <Object type="0x00c9" id="Base Ability">
+    <Class>Equipment</Class>
+    <Activate radius="4" baseDamage="500">DetonateHex</Activate>
+  </Object>
+</Objects>"#,
+        )
+        .unwrap();
+
+        let extra = dir.join("equip_lo.xml");
+        std::fs::write(
+            &extra,
+            r#"<Objects>
+  <Object type="0x00ca" id="Extra Blueprint">
+    <Class>Equipment</Class>
+    <Activate id="Divinity">UnlockForgeBlueprint</Activate>
+  </Object>
+</Objects>"#,
+        )
+        .unwrap();
+
+        list.merge_equipment_xml(&base).unwrap();
+        list.merge_equipment_xml(&extra).unwrap();
+        list.name_to_id.insert("Divinity".to_string(), 100);
+
+        assert_eq!(list.blueprint_unlocked_id(0x00c8), Some(100));
+        assert_eq!(list.blueprint_unlocked_id(0x00ca), Some(100));
+        let ability = list.ability_effects(0x00c9).expect("base ability survives");
+        assert!(ability.detonate_hex.is_some());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

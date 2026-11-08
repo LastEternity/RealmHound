@@ -261,7 +261,7 @@ impl MissionTracker {
         let mut changed = false;
         for season in &defs.seasons {
             for def in &season.missions {
-                if !def.name.contains("Repeatable") {
+                if !def.is_repeatable() {
                     continue;
                 }
                 let Some(rt) = self.runtime.get_mut(&(season.id, def.id)) else {
@@ -431,7 +431,7 @@ impl MissionTracker {
             RewardView::Item { object_id, .. } if *object_id > 0 => Some(*object_id),
             _ => None,
         });
-        let repeatable = def.name.contains("Repeatable");
+        let repeatable = def.is_repeatable();
         let name = def
             .name
             .replace("(Repeatable)", "")
@@ -792,7 +792,9 @@ pub struct MissionEntryView {
     /// character must have an item of one of these slot types equipped to make
     /// progress. Empty when unrestricted.
     pub worn_restriction: Vec<WornReqView>,
-    /// True when the mission title is flagged `(Repeatable)`.
+    /// True when the mission is repeatable: either its name carries the
+    /// `(Repeatable)` marker or it declares a positive repeat `interval`. This
+    /// drives the cooldown label, `reset_at`, and the cooldown bucket.
     pub repeatable: bool,
     /// Reward-sprite fallback for the mission icon (first item reward).
     pub icon_object_id: Option<i32>,
@@ -993,6 +995,47 @@ mod tests {
     }
 
     #[test]
+    fn interval_only_repeatable_gets_a_cooldown_and_expires() {
+        // Newer repeatables (e.g. The Dragon's Omen) carry no "(Repeatable)"
+        // marker; only a positive interval. They must still show the cooldown
+        // and reset when the interval elapses.
+        const RDEFS: &str = r#"
+        {
+          "seasons": [{
+            "name": "S", "current": 1, "id": 52,
+            "missions": [
+              { "id": 9, "name": "The Dragon's Omen",
+                "desc": "d", "interval": 3.0,
+                "conds": [{ "type": 2, "target": "", "amount": 3 }],
+                "rewards": [{ "type": 1, "target": "", "amount": 3000 }] }
+            ]
+          }]
+        }"#;
+        let mut t = MissionTracker::new();
+        t.apply_definitions(parse_client_seasons(RDEFS).unwrap());
+        // Claimed with progress 3/3 and a claim timestamp three days back.
+        t.apply_player_missions(realmhound_core::api::parse_player_missions(
+            "<Missions><Season id=\"52\">9,3,3,1787053943,1,1000000</Season></Missions>",
+        ));
+        let view = t.build_view();
+        let m = entry(&view, 9);
+        assert!(
+            m.repeatable,
+            "a positive interval marks the mission repeatable"
+        );
+        assert_eq!(m.state, MissionState::Claimed);
+        assert_eq!(m.reset_at, Some(1_000_000 + 3 * 86_400));
+
+        // The interval elapsed: the tracker resets it without a Refresh.
+        assert!(t.expire_cooldowns(1_259_200));
+        let view = t.build_view();
+        let m = entry(&view, 9);
+        assert_eq!(m.state, MissionState::InProgress);
+        assert_eq!(m.objectives[0].have, 0);
+        assert_eq!(m.reset_at, None);
+    }
+
+    #[test]
     fn confirmed_claim_anchors_repeatable_cooldown_to_now() {
         // Re-claiming a repeatable from packets must anchor the cooldown to the
         // claim moment, not leave a stale (past) claimed_at -- otherwise the view
@@ -1157,7 +1200,7 @@ mod tests {
         assert_eq!(entry(&v, 2).state, MissionState::InProgress);
     }
 
-    /// The live tree shape that produced #59: mission 2 is a daily repeatable
+    /// The live tree shape that produced the reset-gate bug: mission 2 is a daily repeatable
     /// that gates a whole multi-branch subtree (missions 3-5).
     const REPEATABLE_GATE_DEFS: &str = r#"
     {
@@ -1229,8 +1272,8 @@ mod tests {
 
     #[test]
     fn only_the_tree_frontier_is_active_for_a_fresh_account() {
-        // The server lists *every* mission of the tree in its <Season> block
-        // (issue #20); a fresh account reports them all at zero progress. Only
+        // The server lists *every* mission of the tree in its <Season> block;
+        // a fresh account reports them all at zero progress. Only
         // the root is active -- everything behind an unfinished parent is locked
         // rather than "In progress".
         let mut t = MissionTracker::new();
@@ -1315,7 +1358,7 @@ mod tests {
         }
     }
 
-    /// Regression for the *non-repeatable* half of #59, from a captured tree.
+    /// Regression for the *non-repeatable* half of the reset-gate bug, from a captured tree.
     ///
     /// `season52_the_mad_gods_tempest.json` is a real `getClientSeasons` body
     /// (The Mad God's Tempest, 36 missions; 15 of them repeatable gates). Its

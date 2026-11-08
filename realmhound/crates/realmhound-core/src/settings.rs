@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Current settings file version for migration support.
-const SETTINGS_VERSION: u32 = 8;
+const SETTINGS_VERSION: u32 = 9;
 
 /// Rename an unparseable data file to a timestamped `.corrupt-<ts>.bak` sibling
 /// so a single bad field can't silently wipe the user's data on the next save.
@@ -1891,6 +1891,11 @@ pub struct TrophyHallSettings {
     /// Legacy Heroic ones) are listed. On by default.
     #[serde(default = "default_true")]
     pub show_legacy_dungeons: bool,
+    /// Whether the dungeon page's collection shows a rarity gem on discovered
+    /// items (highest discovered slot count). On by default; the compact
+    /// collections on the index page never show gems.
+    #[serde(default = "default_true")]
+    pub show_item_rarities: bool,
 }
 
 impl Default for TrophyHallSettings {
@@ -1900,6 +1905,7 @@ impl Default for TrophyHallSettings {
             show_no_collection_dungeons: false,
             compact_view: false,
             show_legacy_dungeons: true,
+            show_item_rarities: true,
         }
     }
 }
@@ -2057,6 +2063,47 @@ impl Default for MissionsSettings {
     }
 }
 
+/// Which storage side's mark progress a quest shows. `Both` keeps the two
+/// Seasonal and Regular rows; the single-side modes hide the other row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum QuestMarkProgressMode {
+    /// Show both the Seasonal and Regular collected rows (default).
+    #[default]
+    Both,
+    /// Show seasonal mark progress only.
+    Seasonal,
+    /// Show regular mark progress only.
+    Regular,
+}
+
+impl QuestMarkProgressMode {
+    /// Whether the Seasonal collected row is shown.
+    pub fn show_seasonal(self) -> bool {
+        !matches!(self, QuestMarkProgressMode::Regular)
+    }
+
+    /// Whether the Regular collected row is shown.
+    pub fn show_regular(self) -> bool {
+        !matches!(self, QuestMarkProgressMode::Seasonal)
+    }
+}
+
+/// Which storage side(s) can satisfy a Daily Quest Chest for the Quests tab
+/// header chest cue. `Any` matches a full set of marks on either side;
+/// `Combined` counts Seasonal and Regular marks together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum QuestChestHeaderMode {
+    /// Either storage side on its own (default, previous behaviour).
+    #[default]
+    Any,
+    /// Seasonal marks only.
+    Seasonal,
+    /// Regular marks only.
+    Regular,
+    /// Seasonal plus Regular marks counted together.
+    Combined,
+}
+
 /// Quests tab settings. Persists the sections the user has collapsed and the
 /// sections toggled off, keyed by the stable per-section id, so choices survive
 /// app restarts.
@@ -2077,6 +2124,14 @@ pub struct QuestsSettings {
     /// Hide the quest-name column to save horizontal space.
     #[serde(default)]
     pub hide_names: bool,
+
+    /// Which mark-progress row(s) quest cards and task pill tooltips show.
+    #[serde(default)]
+    pub mark_progress: QuestMarkProgressMode,
+
+    /// Which storage side(s) can show the claimable chest in the tab header.
+    #[serde(default)]
+    pub header_chest: QuestChestHeaderMode,
 }
 
 /// Which dungeon difficulty tiers trigger a public key-pop notification.
@@ -2122,6 +2177,33 @@ impl KeyPopTierFilter {
             Some(KeyPopTier::Expert) => self.expert,
             Some(KeyPopTier::Exaltation) => self.exaltation,
             None => true,
+        }
+    }
+}
+
+/// One custom-chat trigger alert: comma-separated whole-word variants and a
+/// stable id that keys its own volume and custom sound file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChatTriggerAlert {
+    /// Stable id used for `custom_chat_{id}` sound/volume keys. Id 0 is the
+    /// migrated legacy single trigger and keeps the old `custom_chat` key.
+    #[serde(default)]
+    pub id: u32,
+    /// Comma-separated trigger variants.
+    #[serde(default)]
+    pub words: String,
+    /// Optional user-visible group name shown in the collapsed header.
+    #[serde(default)]
+    pub name: String,
+}
+
+impl ChatTriggerAlert {
+    /// `custom_sounds` / `sound_volumes` key for this alert.
+    pub fn sound_key(&self) -> String {
+        if self.id == 0 {
+            "custom_chat".to_string()
+        } else {
+            format!("custom_chat_{}", self.id)
         }
     }
 }
@@ -2206,18 +2288,20 @@ pub struct SoundSettings {
     #[serde(default)]
     pub ign_mention: bool,
 
-    /// Play a ping when a chat message contains the trigger text configured in
-    /// [`Self::custom_chat_text`] as a whole word. Off by default.
+    /// Play a ping when a chat message contains any configured custom-chat
+    /// trigger variant. Off by default; this is the master switch for
+    /// [`Self::custom_chat_alerts`].
     #[serde(default)]
     pub custom_chat: bool,
 
-    /// Trigger text for the custom chat ping. Empty by default, so no custom
-    /// ping fires until the user sets a word (the settings field shows `abyss` as
-    /// its example). Matched case-insensitively against whole words, so it never
-    /// fires on a substring such as `abyssal`. Capped at
-    /// [`crate::chat_ping::CUSTOM_CHAT_TEXT_MAX`] characters by the settings UI.
-    #[serde(default)]
+    /// Legacy single trigger word, read only for migration into
+    /// [`Self::custom_chat_alerts`]. Never serialized after migration.
+    #[serde(default, skip_serializing)]
     pub custom_chat_text: String,
+
+    /// Configured custom-chat alerts, each with its own variants and sound.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_chat_alerts: Vec<ChatTriggerAlert>,
 
     /// Play the Dimitus alert sound when entering a dungeon with the Dimitus
     /// modifier (golden outline). Off by default.
@@ -2514,6 +2598,7 @@ impl Default for SoundSettings {
             ign_mention: false,
             custom_chat: false,
             custom_chat_text: String::new(),
+            custom_chat_alerts: Vec::new(),
             // Dimitus dungeon alert disabled by default
             dimitus_dungeon: false,
             // Bad-mod warning disabled by default
@@ -2546,6 +2631,30 @@ impl SoundSettings {
     pub fn set_sound_volume(&mut self, key: &str, volume: f32) {
         self.sound_volumes
             .insert(key.to_string(), volume.clamp(0.0, 1.0));
+    }
+
+    /// Move the legacy single trigger word into `custom_chat_alerts` and align
+    /// the master switch with the result: on when at least one alert exists,
+    /// off when none do. Runs once when upgrading to settings v9.
+    pub fn migrate_custom_chat_alerts(&mut self) {
+        self.migrate_legacy_custom_chat_text();
+        self.custom_chat = !self.custom_chat_alerts.is_empty();
+    }
+
+    /// Move the legacy single trigger word into `custom_chat_alerts` while
+    /// leaving the master switch untouched.
+    fn migrate_legacy_custom_chat_text(&mut self) {
+        let legacy = crate::chat_ping::normalize_trigger_words(&self.custom_chat_text);
+        if !legacy.is_empty() && self.custom_chat_alerts.is_empty() {
+            self.custom_chat_alerts.push(ChatTriggerAlert {
+                id: 0,
+                words: legacy,
+                name: String::new(),
+            });
+        }
+        self.custom_chat_text.clear();
+        self.custom_chat_alerts
+            .truncate(crate::chat_ping::CUSTOM_CHAT_ALERTS_MAX);
     }
 }
 
@@ -2703,6 +2812,15 @@ impl Settings {
                 self.live_feed.nexus_marker = NexusMarker::InNexus;
             }
         }
+        if self.version < 9 {
+            // 0.22.0's single custom-chat word becomes Alert 1, and the switch
+            // follows whether any alerts ended up configured.
+            self.sound.migrate_custom_chat_alerts();
+        } else if !self.sound.custom_chat_text.is_empty() {
+            // Legacy text is never serialized, so only an unsaved/manual edit
+            // can reach here; migrate it without touching the switch state.
+            self.sound.migrate_legacy_custom_chat_text();
+        }
         self.version = SETTINGS_VERSION;
     }
 
@@ -2746,6 +2864,14 @@ pub enum SettingsSaveError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn settings_path_matches_storage_root() {
+        let root = crate::storage::StorageRoot::default_local().expect("storage root");
+        assert_eq!(
+            super::Settings::settings_path(),
+            Some(root.path().join("settings.json"))
+        );
+    }
     use super::*;
 
     #[test]
@@ -2936,12 +3062,34 @@ mod tests {
     }
 
     #[test]
+    fn quest_mark_and_header_modes_default_and_round_trip() {
+        let d = QuestsSettings::default();
+        assert_eq!(d.mark_progress, QuestMarkProgressMode::Both);
+        assert_eq!(d.header_chest, QuestChestHeaderMode::Any);
+
+        // Configs saved before these options existed still load with defaults.
+        let legacy = r#"{ "collapsed": [1], "hide_names": true }"#;
+        let parsed: QuestsSettings = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.mark_progress, QuestMarkProgressMode::Both);
+        assert_eq!(parsed.header_chest, QuestChestHeaderMode::Any);
+
+        let mut s = QuestsSettings::default();
+        s.mark_progress = QuestMarkProgressMode::Regular;
+        s.header_chest = QuestChestHeaderMode::Combined;
+        let back: QuestsSettings =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.mark_progress, QuestMarkProgressMode::Regular);
+        assert_eq!(back.header_chest, QuestChestHeaderMode::Combined);
+    }
+
+    #[test]
     fn chat_ping_sounds_default_off_and_survive_missing_json() {
-        // Both extra chat pings are opt-in and the trigger word starts empty.
+        // Both extra chat pings are opt-in and start with no alerts.
         let d = SoundSettings::default();
         assert!(!d.ign_mention);
         assert!(!d.custom_chat);
         assert!(d.custom_chat_text.is_empty());
+        assert!(d.custom_chat_alerts.is_empty());
 
         // Back-compat: configs saved before these options existed still load.
         let legacy = r#"{ "volume": 0.5, "whitebag": true, "pm": true, "guild": true }"#;
@@ -2950,16 +3098,107 @@ mod tests {
         assert!(!parsed.ign_mention);
         assert!(!parsed.custom_chat);
         assert!(parsed.custom_chat_text.is_empty());
+        assert!(parsed.custom_chat_alerts.is_empty());
 
-        // Round-trip preserves both toggles and the configured trigger.
+        // Round-trip preserves both toggles and the configured alerts.
         let mut s = SoundSettings::default();
         s.ign_mention = true;
         s.custom_chat = true;
-        s.custom_chat_text = "abyss".into();
+        s.custom_chat_alerts.push(ChatTriggerAlert {
+            id: 0,
+            words: "abyss, abby".into(),
+            name: "Abyss".into(),
+        });
         let back: SoundSettings =
             serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert!(back.ign_mention && back.custom_chat);
-        assert_eq!(back.custom_chat_text, "abyss");
+        assert_eq!(back.custom_chat_alerts.len(), 1);
+        assert_eq!(back.custom_chat_alerts[0].words, "abyss, abby");
+        assert_eq!(back.custom_chat_alerts[0].name, "Abyss");
+    }
+
+    #[test]
+    fn legacy_single_trigger_migrates_to_an_alert() {
+        let mut s = SoundSettings::default();
+        s.custom_chat_text = " abyss, ABYSS, abby ".into();
+        s.migrate_custom_chat_alerts();
+
+        assert_eq!(s.custom_chat_alerts.len(), 1);
+        assert_eq!(s.custom_chat_alerts[0].id, 0);
+        assert_eq!(s.custom_chat_alerts[0].words, "abyss, abby");
+        assert!(s.custom_chat);
+        assert!(s.custom_chat_text.is_empty());
+
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("custom_chat_text"));
+        assert!(json.contains("custom_chat_alerts"));
+    }
+
+    #[test]
+    fn chat_trigger_alert_sound_keys_are_stable() {
+        assert_eq!(
+            ChatTriggerAlert {
+                id: 0,
+                words: String::new(),
+                name: String::new(),
+            }
+            .sound_key(),
+            "custom_chat"
+        );
+        assert_eq!(
+            ChatTriggerAlert {
+                id: 3,
+                words: String::new(),
+                name: String::new(),
+            }
+            .sound_key(),
+            "custom_chat_3"
+        );
+    }
+
+    #[test]
+    fn loading_settings_migrates_the_legacy_trigger() {
+        let json = r#"{"sound":{"custom_chat":true,"custom_chat_text":"abyss, abby"}}"#;
+        let settings = Settings::from_json(json).unwrap();
+        assert_eq!(settings.sound.custom_chat_alerts.len(), 1);
+        assert_eq!(settings.sound.custom_chat_alerts[0].words, "abyss, abby");
+        assert!(settings.sound.custom_chat_text.is_empty());
+    }
+
+    #[test]
+    fn v9_migration_enables_custom_chat_for_migrated_words() {
+        let json =
+            r#"{"version":8,"sound":{"custom_chat":false,"custom_chat_text":"abyss, abby"}}"#;
+        let settings = Settings::from_json(json).unwrap();
+        assert_eq!(settings.sound.custom_chat_alerts.len(), 1);
+        assert_eq!(settings.sound.custom_chat_alerts[0].words, "abyss, abby");
+        assert!(settings.sound.custom_chat);
+        assert!(settings.sound.custom_chat_text.is_empty());
+        assert_eq!(settings.version, SETTINGS_VERSION);
+    }
+
+    #[test]
+    fn v9_migration_leaves_custom_chat_off_without_alerts() {
+        let json = r#"{"version":8,"sound":{"custom_chat":true}}"#;
+        let settings = Settings::from_json(json).unwrap();
+        assert!(settings.sound.custom_chat_alerts.is_empty());
+        assert!(!settings.sound.custom_chat);
+    }
+
+    #[test]
+    fn v9_migration_enables_custom_chat_when_alerts_already_exist() {
+        let json = r#"{"version":8,"sound":{"custom_chat":false,"custom_chat_alerts":[{"id":3,"words":"abyss","name":"Abyss"}]}}"#;
+        let settings = Settings::from_json(json).unwrap();
+        assert_eq!(settings.sound.custom_chat_alerts.len(), 1);
+        assert!(settings.sound.custom_chat);
+    }
+
+    #[test]
+    fn current_settings_keep_an_explicit_custom_chat_off_choice() {
+        let json = r#"{"version":9,"sound":{"custom_chat":false,"custom_chat_alerts":[{"id":3,"words":"abyss","name":"Abyss"}]}}"#;
+        let settings = Settings::from_json(json).unwrap();
+        assert_eq!(settings.sound.custom_chat_alerts.len(), 1);
+        assert!(!settings.sound.custom_chat);
     }
 
     #[test]

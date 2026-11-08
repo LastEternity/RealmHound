@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
+  <url>
+    <loc>https://lasteternity.github.io/RealmHound/</loc>
+    <lastmod>2026-10-22</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>1.0</priority>
+    <image:image>
+      <image:loc>https://lasteternity.github.io/RealmHound/assets/features/combat-history-1.png</image:loc>
+      <image:title>RealmHound combat history and DPS tracking for a boss fight</image:title>
+    </image:image>
+    <image:image>
+      <image:loc>https://lasteternity.github.io/RealmHound/assets/features/loot-history-1.png</image:loc>
+      <image:title>RealmHound loot history and trophy collections</image:title>
+    </image:image>
+    <image:image>
+      <image:loc>https://lasteternity.github.io/RealmHound/assets/features/trophy-hall-1.png</image:loc>
+      <image:title>RealmHound Trophy Hall of rare item collections sorted by dungeon</image:title>
+    </image:image>
+  </url>
+  <url>
+    <loc>https://lasteternity.github.io/RealmHound/research/damage-sources-status.html</loc>
+    <lastmod>2026-10-22</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+  </url>
+</urlset>

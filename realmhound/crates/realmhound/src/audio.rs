@@ -24,7 +24,10 @@ use realmhound_core::Settings;
 use crate::processing::AudioCommand;
 #[cfg(feature = "latency-diagnostics")]
 use crate::sound::{record_audio_channel_full, record_audio_command};
-use crate::sound::{resolve_custom_sound, resolve_custom_sound_key, SoundEngine, SoundType};
+use crate::sound::{
+    resolve_custom_sound, resolve_custom_sound_key, resolve_event_custom_sound, SoundEngine,
+    SoundType,
+};
 
 /// Bound on the audio command channel. Small: audio is latency-tolerant and we
 /// coalesce duplicates anyway, so a backlog should never accumulate.
@@ -53,6 +56,7 @@ impl TimedCommand {
             AudioCommand::PlayForBag(_) => "play_for_bag",
             AudioCommand::PlayForBagShiny(_) => "play_for_bag_shiny",
             AudioCommand::PlayEvent { .. } => "play_event",
+            AudioCommand::PlayCustomChat { .. } => "play_custom_chat",
             AudioCommand::SetVolume(_) => "set_volume",
         }
     }
@@ -264,6 +268,9 @@ fn run(
     let mut last_played: HashMap<SoundType, Instant> = HashMap::new();
     // Discovered instances coalesce independently while sharing a sound file.
     let mut last_event: HashMap<(String, Option<i32>), Instant> = HashMap::new();
+    // Each configured custom-chat alert coalesces independently, so a burst of
+    // matching messages cannot stack overlapping playback of distinct alerts.
+    let mut last_custom_chat: HashMap<String, Instant> = HashMap::new();
     #[cfg(feature = "latency-diagnostics")]
     let mut stale_drops = StaleDropDiagnostics::default();
     #[cfg(feature = "latency-diagnostics")]
@@ -384,7 +391,7 @@ fn run(
                     .map(|s| {
                         (
                             s.sound.volume,
-                            resolve_custom_sound_key(&s.sound, &custom_key),
+                            resolve_event_custom_sound(&s.sound, &custom_key),
                         )
                     })
                     .unwrap_or((1.0, None));
@@ -398,6 +405,34 @@ fn run(
                 last_event.insert(key, now);
                 engine.play_at(
                     sound,
+                    custom_path,
+                    volume * master,
+                    #[cfg(feature = "latency-diagnostics")]
+                    timed.dispatched_at,
+                );
+            }
+            AudioCommand::PlayCustomChat { custom_key, volume } => {
+                let (master, custom_path) = settings
+                    .read()
+                    .map(|s| {
+                        (
+                            s.sound.volume,
+                            resolve_custom_sound_key(&s.sound, &custom_key),
+                        )
+                    })
+                    .unwrap_or((1.0, None));
+                let now = Instant::now();
+                last_custom_chat.retain(|_, at| now.duration_since(*at) < COALESCE_WINDOW);
+                if last_custom_chat.contains_key(&custom_key) {
+                    tracing::trace!(
+                        "[AUDIO] coalescing duplicate custom chat alert {}",
+                        custom_key
+                    );
+                    continue;
+                }
+                last_custom_chat.insert(custom_key, now);
+                engine.play(
+                    SoundType::CustomChat,
                     custom_path,
                     volume * master,
                     #[cfg(feature = "latency-diagnostics")]

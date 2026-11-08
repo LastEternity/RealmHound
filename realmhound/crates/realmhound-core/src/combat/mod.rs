@@ -18,7 +18,7 @@ mod types;
 
 pub use database::{
     CombatDatabase, DungeonTimeTotal, EncounterRecord, FightQuery, FightRecord, FightSummary,
-    ParticipantRecord, LOOT_LINK_POST_MS, LOOT_LINK_PRE_MS, REQUIRED_TABLES,
+    ParticipantRecord, RepairBatch, LOOT_LINK_POST_MS, LOOT_LINK_PRE_MS, REQUIRED_TABLES,
     SUPPORTED_SCHEMA_VERSION,
 };
 pub use export::{build_bundle, ExportBundle};
@@ -29,6 +29,6 @@ pub use tracker::{
 };
 pub use types::{
     AbilityActivation, BoostWindow, CompletedFight, DamageProvenance, DamageTakenProvenance,
-    FightParticipant, FightSelection, ParticipantEndStatus, PetInfo, SummonContribution,
-    WeaponContribution,
+    FightParticipant, FightSelection, ItemProcContribution, LethalStrikeContribution,
+    ParticipantEndStatus, PatternContribution, PetInfo, SummonContribution, WeaponContribution,
 };
