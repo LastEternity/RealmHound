@@ -29,8 +29,9 @@ use crate::stats::derived::pet_ability_deals_damage;
 use super::damage::{self, AttackerStats, Rng, DEFAULT_EXALT_BONUS};
 use super::types::{
     AbilityActivation, BoostWindow, CompletedFight, DamageProvenance, DamageTakenProvenance,
-    FightParticipant, ItemProcContribution, LethalStrikeContribution, ParticipantEndStatus,
-    PatternContribution, PetInfo, SummonContribution, WeaponContribution,
+    FightParticipant, ItemProcContribution, LethalStrikeContribution, LiveBossDpsSnapshot,
+    LiveDpsParticipant, ParticipantEndStatus, PatternContribution, PetInfo, SummonContribution,
+    WeaponContribution,
 };
 
 /// MaxHP fallback for boss classification, used only when an enemy is not tag-
@@ -1705,6 +1706,226 @@ impl CombatTracker {
     /// Recently completed fights held in memory.
     pub fn recent_fights(&self) -> &[CompletedFight] {
         &self.recent_fights
+    }
+
+    /// Build a compact snapshot of the currently active boss fight (or the most
+    /// recently completed fight if none is currently active) for the in-game
+    /// Live DPS overlay tab.
+    pub fn live_dps_snapshot(&self) -> Option<LiveBossDpsSnapshot> {
+        let assets = get_asset_manager();
+
+        let fight_has_activity = |f: &&FightState| {
+            f.attackers
+                .values()
+                .any(|a| a.damage > 0 || a.hits > 0)
+        };
+
+        let fight_priority = |f: &&FightState| {
+            let not_crate = !assets.is_treasure_crate(f.boss_object_type);
+            let local_engaged = f.attackers.iter().any(|(&aid, a)| {
+                (a.is_local || aid == self.local_object_id) && (a.damage > 0 || a.hits > 0)
+            });
+            (not_crate, local_engaged, f.last_activity, f.boss_max_hp, f.boss_object_id)
+        };
+
+        if let Some(active) = self
+            .fights
+            .values()
+            .filter(fight_has_activity)
+            .max_by_key(fight_priority)
+        {
+            if let Some(snap) = self.snapshot_from_fight_state(active) {
+                return Some(snap);
+            }
+        }
+
+        let latest_completed = self
+            .recent_fights
+            .iter()
+            .rev()
+            .find(|cf| !assets.is_treasure_crate(cf.boss_object_type))
+            .or_else(|| self.recent_fights.last());
+
+        let dormant_candidate = self
+            .dormant_by_id
+            .values()
+            .chain(self.dormant_fights.values())
+            .filter(fight_has_activity)
+            .max_by_key(fight_priority);
+
+        if let Some(dormant) = dormant_candidate {
+            let completed_ended = latest_completed.map(|cf| cf.ended_at).unwrap_or(0);
+            if dormant.last_activity > completed_ended {
+                if let Some(snap) = self.snapshot_from_fight_state(dormant) {
+                    return Some(snap);
+                }
+            }
+        }
+
+        latest_completed.map(|cf| self.snapshot_from_completed(cf))
+    }
+
+    fn to_live_participant(p: &FightParticipant) -> LiveDpsParticipant {
+        LiveDpsParticipant {
+            name: p.name.clone(),
+            object_type: p.object_type,
+            skin_id: p.skin_id,
+            tex1: p.tex1,
+            tex2: p.tex2,
+            damage: p.damage,
+            hits: p.hits,
+            is_local: p.is_local,
+            provenance: p.provenance,
+        }
+    }
+
+    fn snapshot_from_fight_state(&self, fight: &FightState) -> Option<LiveBossDpsSnapshot> {
+        let mut participants: Vec<FightParticipant> = fight
+            .attackers
+            .iter()
+            .map(|(&aid, accum)| self.build_participant(aid, accum, fight.joined_late))
+            .collect();
+        drop_unresolved(&mut participants);
+        participants.retain(|p| p.damage > 0 || p.hits > 0);
+        participants.sort_by(|a, b| b.damage.cmp(&a.damage).then(b.hits.cmp(&a.hits)));
+        self.reconcile_masked_local(fight, &mut participants);
+        participants.sort_by(|a, b| b.damage.cmp(&a.damage).then(b.hits.cmp(&a.hits)));
+
+        if participants.is_empty() {
+            return None;
+        }
+
+        let assets = get_asset_manager();
+        let shatters_hm = self
+            .shatters_hm_revealed_name(fight.boss_object_type)
+            .is_some();
+        let boss_name = match fight.display_name_override {
+            Some(name) => name.to_string(),
+            None => {
+                let base = match self.shatters_hm_revealed_name(fight.boss_object_type) {
+                    Some(name) => name.to_string(),
+                    None => assets
+                        .object_name(fight.boss_object_type)
+                        .unwrap_or_else(|| format!("Boss 0x{:04X}", fight.boss_object_type as u16)),
+                };
+                match fight.segment_label {
+                    Some(label) => format!("{base} ({label})"),
+                    None => base,
+                }
+            }
+        };
+
+        let raw_dungeon = normalize_dungeon(&self.current_map);
+        let dungeon = crate::assets::canonical_dungeon_for_boss_named(
+            fight.boss_object_type,
+            boss_name.trim(),
+        )
+        .map(str::to_string)
+        .unwrap_or(raw_dungeon);
+
+        let total_damage: i64 = participants.iter().map(|p| p.damage.max(0)).sum();
+        let participant_count = participants.len();
+        let local_rank = participants
+            .iter()
+            .position(|p| p.is_local)
+            .map(|idx| idx + 1);
+
+        let local_player = participants
+            .iter()
+            .find(|p| p.is_local)
+            .map(Self::to_live_participant)
+            .or_else(|| {
+                if self.local_object_id == 0 {
+                    return None;
+                }
+                let obj = self.objects.get(&self.local_object_id);
+                let name = obj
+                    .and_then(|o| o.name.as_deref())
+                    .map(sanitize_player_name)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "You".to_string());
+                Some(LiveDpsParticipant {
+                    name,
+                    object_type: obj.map(|o| o.object_type).unwrap_or(0),
+                    skin_id: obj.map(|o| o.skin_id).unwrap_or(0),
+                    tex1: obj.map(|o| o.tex1).unwrap_or(0),
+                    tex2: obj.map(|o| o.tex2).unwrap_or(0),
+                    damage: 0,
+                    hits: 0,
+                    is_local: true,
+                    provenance: DamageProvenance::SelfComputed,
+                })
+            });
+
+        let top_player = participants.first().map(Self::to_live_participant);
+        let runner_up_player = participants.get(1).map(Self::to_live_participant);
+
+        let boss_hp = self
+            .objects
+            .get(&fight.boss_object_id)
+            .filter(|o| o.hp_seen)
+            .map(|o| o.hp.max(0));
+
+        Some(LiveBossDpsSnapshot {
+            boss_object_type: fight.boss_object_type,
+            boss_name,
+            dungeon,
+            boss_hp,
+            boss_max_hp: fight.boss_max_hp,
+            boss_start_hp: fight.boss_start_hp,
+            is_active: true,
+            killed: fight.killed,
+            shatters_hm,
+            duration_ms: (fight.last_activity - fight.started_at).max(0),
+            boss_uptime_ms: fight.boss_uptime_ms.max(0),
+            participant_count,
+            total_damage,
+            local_rank,
+            local_player,
+            top_player,
+            runner_up_player,
+        })
+    }
+
+    fn snapshot_from_completed(&self, cf: &CompletedFight) -> LiveBossDpsSnapshot {
+        let total_damage: i64 = cf.participants.iter().map(|p| p.damage.max(0)).sum();
+        let participant_count = cf.participants.len();
+        let local_rank = cf
+            .participants
+            .iter()
+            .position(|p| p.is_local)
+            .map(|idx| idx + 1);
+        let local_player = cf
+            .participants
+            .iter()
+            .find(|p| p.is_local)
+            .map(Self::to_live_participant);
+        let top_player = cf.participants.first().map(Self::to_live_participant);
+        let runner_up_player = cf.participants.get(1).map(Self::to_live_participant);
+
+        LiveBossDpsSnapshot {
+            boss_object_type: cf.boss_object_type,
+            boss_name: cf.boss_name.clone(),
+            dungeon: cf.dungeon.clone(),
+            boss_hp: if cf.killed || cf.reached_zero {
+                Some(0)
+            } else {
+                None
+            },
+            boss_max_hp: cf.boss_max_hp,
+            boss_start_hp: cf.boss_start_hp,
+            is_active: false,
+            killed: cf.killed,
+            shatters_hm: cf.shatters_hm,
+            duration_ms: cf.duration_ms(),
+            boss_uptime_ms: cf.boss_uptime_ms.max(0),
+            participant_count,
+            total_damage,
+            local_rank,
+            local_player,
+            top_player,
+            runner_up_player,
+        }
     }
 
     /// Record the local player's object id and char id (from CreateSuccess).

@@ -691,6 +691,10 @@ pub struct RealmHoundApp {
     mission_view: crate::processing::MissionView,
     /// Last applied mission_view generation (avoids cloning every frame).
     owned_mission_gen: u64,
+    /// Owned snapshot of the live boss DPS metrics for the overlay.
+    live_dps: Option<realmhound_core::combat::LiveBossDpsSnapshot>,
+    /// Last applied live_dps generation (avoids cloning every frame).
+    owned_live_dps_gen: u64,
     /// Cached Taskbar items, rebuilt only when their inputs change so the row
     /// (and its tooltips) is not reprojected every frame.
     taskbar_items_cache: Vec<crate::panels::taskbar::TaskbarItem>,
@@ -1164,6 +1168,8 @@ impl RealmHoundApp {
             owned_vault_gen: u64::MAX,
             mission_view: crate::processing::MissionView::default(),
             owned_mission_gen: 0,
+            live_dps: None,
+            owned_live_dps_gen: 0,
             taskbar_items_cache: Vec::new(),
             taskbar_cache_sig: None,
             shadcn,
@@ -1522,8 +1528,9 @@ impl RealmHoundApp {
     fn apply_update(&mut self, update: UiUpdate) {
         match update.payload {
             UiPayload::DungeonCallout { .. } => {}
-            UiPayload::Broadcast(_) => {
+            UiPayload::Broadcast(event) => {
                 // Every state-bearing panel is driven by the snapshot.
+                crate::overlay::notify_game_event(&event);
             }
             UiPayload::Chat(_) => {
                 // Chat is written worker-side; DMs come from the live-event window.
@@ -1708,6 +1715,11 @@ impl RealmHoundApp {
                 self.owned_feed_rev = snap.view.feed_rev;
             }
         }
+        if snap.live_dps_gen != self.owned_live_dps_gen {
+            self.live_dps = snap.live_dps.clone();
+            self.owned_live_dps_gen = snap.live_dps_gen;
+        }
+        drop(snap);
         self.maybe_confirm_client_launch(conn_changed);
     }
 
@@ -9560,6 +9572,13 @@ impl RealmHoundApp {
                     text_only,
                     tab_tooltips,
                 );
+                crate::overlay::render_top_bar_button(
+                    ui,
+                    &shadcn,
+                    icon_only,
+                    text_only,
+                    tab_tooltips,
+                );
 
                 // Update notification indicator
                 self.update_panel.render_indicator(ui, &self.update_checker, &shadcn);
@@ -10193,7 +10212,8 @@ impl eframe::App for RealmHoundApp {
         // Check if any modal is open
         let modal_open = self.modals.any_blocking_open()
             || self.update_panel.is_details_open()
-            || crate::ppe_bridge_ui::is_open();
+            || crate::ppe_bridge_ui::is_open()
+            || crate::overlay::is_settings_open();
 
         // Bottom status bar
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
@@ -10238,6 +10258,33 @@ impl eframe::App for RealmHoundApp {
 
         // PPE Bot Bridge modal
         crate::ppe_bridge_ui::render_modal(ctx, &self.shadcn);
+
+        // RotMG In-Game Overlay (settings modal + translucent child viewport)
+        let overlay_connected = matches!(
+            self.view_state.main_account_status,
+            MainAccountStatus::Connected
+        );
+        let overlay_char_id = self
+            .live_char_id
+            .filter(|_| overlay_connected)
+            .or(self.last_live_char_id);
+        crate::overlay::update_and_render(
+            ctx,
+            &self.shadcn,
+            &mut self.sprite_renderer,
+            &self.mission_view,
+            self.owned_mission_gen,
+            self.missions_panel.hidden_mission_ids(),
+            &mut self.quest_panel,
+            &self.account_data,
+            self.account_data_revision,
+            overlay_char_id,
+            self.live_feed_panel.is_seasonal(),
+            self.client_launch_unix,
+            overlay_connected,
+            self.view_state.map_pauses_boost_timers,
+            self.live_dps.as_ref(),
+        );
 
         // Update details window (modal)
         self.update_panel.render_details_window(
@@ -10294,6 +10341,9 @@ impl eframe::App for RealmHoundApp {
         // Stop the worker (which flushes account/vault data on shutdown), with
         // a bounded join timeout so a stuck worker can't hang exit.
         self.worker.shutdown(std::time::Duration::from_secs(5));
+
+        // Flush any pending overlay notes or config changes to disk.
+        crate::overlay::flush_pending_saves();
 
         // Save settings on exit. Also capture the last-seen live character id
         // from app state so it persists even if the mid-session change-write in

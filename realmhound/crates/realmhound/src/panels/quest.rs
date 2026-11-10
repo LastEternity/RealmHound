@@ -811,6 +811,50 @@ impl QuestPanel {
             )
     }
 
+    /// Snapshot of quest state and memoized item counts for the in-game overlay.
+    #[allow(clippy::type_complexity)]
+    pub fn overlay_snapshot(
+        &mut self,
+        account_data: &AccountData,
+        account_epoch: u64,
+    ) -> (
+        &[QuestData],
+        &HashSet<String>,
+        Option<&HashMap<i32, (u32, u32)>>,
+        QuestMarkProgressMode,
+        &realmhound_core::settings::TaskbarSettings,
+        bool,
+    ) {
+        if self.has_data {
+            let key = (account_epoch, self.quests_revision);
+            self.item_counts_memo.update(key, || {
+                Self::build_item_counts_cache(&self.quests, account_data)
+            });
+        }
+        (
+            &self.quests,
+            &self.hidden,
+            self.item_counts_memo.get(),
+            self.mark_progress,
+            &self.taskbar,
+            self.has_data,
+        )
+    }
+}
+
+/// True when `quest` belongs to the Daily Quest Chests section.
+pub(crate) fn is_daily_chest_quest(quest: &QuestData) -> bool {
+    QuestSection::for_quest(quest) == QuestSection::DailyChests
+}
+
+/// Section title and whether it resets daily, for overlay quest grouping.
+pub(crate) fn quest_section_info(quest: &QuestData) -> (&'static str, bool) {
+    let sec = QuestSection::for_quest(quest);
+    (sec.title(), is_daily_reset_section(sec))
+}
+
+impl QuestPanel {
+
     /// Render the quest panel.
     pub fn render(
         &mut self,

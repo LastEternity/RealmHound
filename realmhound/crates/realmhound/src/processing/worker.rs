@@ -270,6 +270,7 @@ pub fn spawn(
         pub_quest_rev: u64::MAX,
         pub_live_event_rev: u64::MAX,
         pub_feed_rev: u64::MAX,
+        pub_live_dps: None,
         #[cfg(feature = "latency-diagnostics")]
         latency: LatencyDiagnostics::default(),
     };
@@ -333,6 +334,7 @@ struct Worker {
     pub_quest_rev: u64,
     pub_live_event_rev: u64,
     pub_feed_rev: u64,
+    pub_live_dps: Option<realmhound_core::combat::LiveBossDpsSnapshot>,
     #[cfg(feature = "latency-diagnostics")]
     latency: LatencyDiagnostics,
 }
@@ -1246,6 +1248,8 @@ impl Worker {
         let feed_rev = view.feed_rev;
         let feed_changed = feed_rev != self.pub_feed_rev;
         let view_changed = self.pub_view.as_ref() != Some(&view);
+        let live_dps = self.processor.live_dps_snapshot();
+        let live_dps_changed = self.pub_live_dps != live_dps;
 
         let lock_started = Instant::now();
         let previous = match self.snapshot.lock() {
@@ -1269,6 +1273,8 @@ impl Worker {
             .flatten();
         let live_events = live_events_changed.then(|| Arc::new(self.processor.live_event_window()));
         let feed = feed_changed.then(|| Arc::new(self.processor.feed_context()));
+
+        let dps_update = live_dps_changed.then(|| live_dps.clone());
         let next = previous.next(
             view.clone(),
             live_char_id,
@@ -1282,6 +1288,7 @@ impl Worker {
             quests,
             live_events,
             feed,
+            dps_update,
         );
         let lock_started = Instant::now();
         let replaced = match self.snapshot.lock() {
@@ -1304,7 +1311,8 @@ impl Worker {
         self.pub_live_event_rev = live_event_rev;
         self.pub_feed_rev = feed_rev;
         self.pub_view = Some(view);
-        view_changed
+        self.pub_live_dps = live_dps;
+        view_changed || (live_dps_changed && crate::overlay::is_enabled())
     }
 }
 

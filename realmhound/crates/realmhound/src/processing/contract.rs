@@ -837,6 +837,10 @@ pub struct ModelSnapshot {
     pub live_events: Arc<LiveEventWindow>,
     /// Worker-owned Live Feed context (location, score, discovery, anchors).
     pub feed: Arc<FeedContext>,
+    /// Latest live boss DPS snapshot for the in-game overlay.
+    pub live_dps: Option<realmhound_core::combat::LiveBossDpsSnapshot>,
+    /// Monotonic generation bumped whenever `live_dps` changes.
+    pub live_dps_gen: u64,
 }
 
 impl ModelSnapshot {
@@ -862,6 +866,8 @@ impl ModelSnapshot {
             quests: None,
             live_events: Arc::new(LiveEventWindow::default()),
             feed: Arc::new(FeedContext::default()),
+            live_dps: None,
+            live_dps_gen: 0,
         }
     }
 
@@ -881,7 +887,12 @@ impl ModelSnapshot {
         quests: Option<Arc<QuestView>>,
         live_events: Option<Arc<LiveEventWindow>>,
         feed: Option<Arc<FeedContext>>,
+        live_dps: Option<Option<realmhound_core::combat::LiveBossDpsSnapshot>>,
     ) -> Self {
+        let (live_dps, live_dps_gen) = match live_dps {
+            Some(new_dps) => (new_dps, self.live_dps_gen.wrapping_add(1)),
+            None => (self.live_dps.clone(), self.live_dps_gen),
+        };
         Self {
             selected_identity: self.selected_identity.clone(),
             view,
@@ -896,6 +907,8 @@ impl ModelSnapshot {
             quests: quests.or_else(|| self.quests.clone()),
             live_events: live_events.unwrap_or_else(|| self.live_events.clone()),
             feed: feed.unwrap_or_else(|| self.feed.clone()),
+            live_dps,
+            live_dps_gen,
         }
     }
 }
@@ -936,6 +949,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         assert!(Arc::ptr_eq(&next.live_vault_data, &old_vault));
@@ -962,10 +976,12 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(Arc::ptr_eq(with_token.token.as_ref().unwrap(), &token));
         let reused = with_token.next(
             ViewState::new(None, None),
+            None,
             None,
             None,
             None,

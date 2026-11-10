@@ -315,7 +315,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0; 1024];
-            stream.read(&mut request).unwrap();
+            let _ = stream.read(&mut request).unwrap();
             stream
                 .write_all(b"HTTP/1.1 307 Temporary Redirect\r\nLocation: https://example.invalid/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 .unwrap();

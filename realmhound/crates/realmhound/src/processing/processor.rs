@@ -1349,6 +1349,11 @@ impl PacketProcessor {
         }
     }
 
+    /// Build the current live boss DPS snapshot for the in-game overlay.
+    pub fn live_dps_snapshot(&self) -> Option<realmhound_core::combat::LiveBossDpsSnapshot> {
+        self.combat.live_dps_snapshot()
+    }
+
     /// Advance elapsed mission cooldowns before publishing or applying packets.
     pub fn expire_mission_cooldowns(&mut self) -> bool {
         self.mission_tracker.expire_cooldowns(now_ms() / 1000)

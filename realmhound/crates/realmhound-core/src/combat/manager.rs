@@ -6,7 +6,7 @@
 
 use super::database::CombatDatabase;
 use super::tracker::{is_groupable_dungeon, normalize_dungeon, CombatTracker};
-use super::types::{CompletedFight, FightSelection};
+use super::types::{CompletedFight, FightSelection, LiveBossDpsSnapshot};
 use crate::assets::boss_group;
 use crate::protocol::data::ObjectStatusData;
 use crate::settings::CombatHistorySettings;
@@ -196,6 +196,12 @@ impl CombatManager {
     /// the last call (Lone fighter / Last hero standing / Most damage taken).
     pub fn take_pending_stat_awards(&mut self) -> std::collections::HashMap<i32, (i64, i64, i64)> {
         std::mem::take(&mut self.pending_stat_awards)
+    }
+
+    /// Snapshot of the currently active (or most recently completed) boss fight
+    /// for the in-game Live DPS overlay tab.
+    pub fn live_dps_snapshot(&self) -> Option<LiveBossDpsSnapshot> {
+        self.tracker.live_dps_snapshot()
     }
 
     fn reconcile_awards_for_selections(&mut self, selections: &[FightSelection]) {

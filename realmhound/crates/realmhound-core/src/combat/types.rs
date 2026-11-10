@@ -542,3 +542,152 @@ pub enum FightSelection {
     /// A grouped encounter, keyed by its `encounter_run_id`.
     Encounter(String),
 }
+
+/// One participant's live or final boss-fight snapshot for the in-game overlay.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LiveDpsParticipant {
+    pub name: String,
+    pub object_type: i32,
+    pub skin_id: i32,
+    pub tex1: u32,
+    pub tex2: u32,
+    pub damage: i64,
+    pub hits: u64,
+    pub is_local: bool,
+    pub provenance: DamageProvenance,
+}
+
+impl Default for DamageProvenance {
+    fn default() -> Self {
+        Self::Observed
+    }
+}
+
+/// Compact snapshot of the active (or most recently completed) boss fight for
+/// the in-game Live DPS overlay tab.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LiveBossDpsSnapshot {
+    /// Boss object type ID (for sprite rendering).
+    pub boss_object_type: i32,
+    /// Resolved display name of the boss (including segment or HM rename).
+    pub boss_name: String,
+    /// Dungeon or realm name.
+    pub dungeon: String,
+    /// Current HP of the boss if known (`None` for uncapped/escaped/unknown).
+    pub boss_hp: Option<i32>,
+    /// Maximum HP of the boss (`0` if uncapped).
+    pub boss_max_hp: i32,
+    /// Starting HP of the boss when first observed.
+    pub boss_start_hp: i32,
+    /// Whether this fight is currently active (`true`) or finished (`false`).
+    pub is_active: bool,
+    /// Whether the boss was killed (when `!is_active`).
+    pub killed: bool,
+    /// Whether the boss is a Shatters hard-mode revealed form.
+    pub shatters_hm: bool,
+    /// Elapsed fight duration in milliseconds (`ended_at - started_at` or `last_activity - started_at`).
+    pub duration_ms: i64,
+    /// Accumulated vulnerable boss uptime in milliseconds (the standard denominator for DPM).
+    pub boss_uptime_ms: i64,
+    /// Total number of ranked participants with attributed damage/hits.
+    pub participant_count: usize,
+    /// Sum of damage across all resolved participants (denominator for `%` share).
+    pub total_damage: i64,
+    /// 1-based rank of the local player among participants (`None` if local player hasn't hit the boss yet).
+    pub local_rank: Option<usize>,
+    /// The local player's participant entry (present even with 0 damage if local player identity is known).
+    pub local_player: Option<LiveDpsParticipant>,
+    /// The #1 top-damage participant entry.
+    pub top_player: Option<LiveDpsParticipant>,
+    /// The #2 runner-up participant entry (shown for comparison when the local player is #1).
+    pub runner_up_player: Option<LiveDpsParticipant>,
+}
+
+impl LiveBossDpsSnapshot {
+    /// Effective denominator in milliseconds for rate calculations (DPM / DPS),
+    /// matching `combat_history.rs` (`boss_uptime_ms` when `> 0`, otherwise
+    /// `duration_ms`). Clamped to at least 1,000 ms while a fight is actively
+    /// starting so the first couple of hits do not produce a sub-second spike.
+    pub fn rate_denom_ms(&self) -> i64 {
+        let raw = if self.boss_uptime_ms > 0 {
+            self.boss_uptime_ms
+        } else {
+            self.duration_ms
+        };
+        if self.is_active {
+            raw.max(1_000)
+        } else {
+            raw.max(0)
+        }
+    }
+
+    /// Damage per minute (`damage * 60_000 / rate_denom_ms`) for a given damage total.
+    pub fn dpm_for(&self, damage: i64) -> Option<f64> {
+        let denom_ms = self.rate_denom_ms();
+        if denom_ms > 0 {
+            Some((damage.max(0) as f64) * 60_000.0 / (denom_ms as f64))
+        } else {
+            None
+        }
+    }
+
+    /// Damage per second (`damage * 1_000 / rate_denom_ms`) for a given damage total.
+    pub fn dps_for(&self, damage: i64) -> Option<f64> {
+        let denom_ms = self.rate_denom_ms();
+        if denom_ms > 0 {
+            Some((damage.max(0) as f64) * 1_000.0 / (denom_ms as f64))
+        } else {
+            None
+        }
+    }
+
+    /// Percentage share of tracked boss damage (`0.0..=100.0`).
+    pub fn share_pct_for(&self, damage: i64) -> Option<f64> {
+        if self.total_damage > 0 {
+            Some((damage.max(0) as f64 / self.total_damage as f64) * 100.0)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod live_dps_tests {
+    use super::*;
+
+    #[test]
+    fn rate_calculations_clamp_starting_active_fights() {
+        let mut snap = LiveBossDpsSnapshot {
+            is_active: true,
+            duration_ms: 200,
+            boss_uptime_ms: 100,
+            total_damage: 10_000,
+            ..Default::default()
+        };
+        // Clamped to 1000ms while active so first hit doesn't produce an extreme spike
+        assert_eq!(snap.rate_denom_ms(), 1_000);
+        assert_eq!(snap.dps_for(1_000), Some(1_000.0));
+        assert_eq!(snap.dpm_for(1_000), Some(60_000.0));
+        assert_eq!(snap.share_pct_for(2_500), Some(25.0));
+
+        // When uptime grows past 1s, it is used accurately
+        snap.boss_uptime_ms = 30_000;
+        assert_eq!(snap.rate_denom_ms(), 30_000);
+        assert_eq!(snap.dps_for(60_000), Some(2_000.0));
+        assert_eq!(snap.dpm_for(60_000), Some(120_000.0));
+    }
+
+    #[test]
+    fn finished_fights_use_actual_uptime() {
+        let snap = LiveBossDpsSnapshot {
+            is_active: false,
+            duration_ms: 60_000,
+            boss_uptime_ms: 45_000,
+            total_damage: 200_000,
+            ..Default::default()
+        };
+        assert_eq!(snap.rate_denom_ms(), 45_000);
+        assert_eq!(snap.dpm_for(45_000), Some(60_000.0));
+    }
+}
+

@@ -33,6 +33,7 @@ mod dock_icon;
 mod enchant_sound;
 mod memo;
 mod modals;
+mod overlay;
 mod panels;
 mod ppe_bridge_ui;
 mod processing;
@@ -151,6 +152,7 @@ fn main() -> Result<()> {
         .with_min_inner_size([800.0, 600.0])
         .with_title("RealmHound")
         .with_app_id("realmhound")
+        .with_transparent(true)
         .with_icon(window_icon());
 
     if let Some(pos) = window_pos.and_then(|(x, y)| validated_window_position(x, y, window_size)) {
@@ -608,6 +610,16 @@ impl RootApp {
 }
 
 impl eframe::App for RootApp {
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        let c = visuals.window_fill();
+        [
+            c.r() as f32 / 255.0,
+            c.g() as f32 / 255.0,
+            c.b() as f32 / 255.0,
+            1.0,
+        ]
+    }
+
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
         if let RootState::Active(app) = &mut self.state {
             app.on_exit(gl);
