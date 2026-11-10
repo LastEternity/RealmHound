@@ -854,7 +854,6 @@ pub(crate) fn quest_section_info(quest: &QuestData) -> (&'static str, bool) {
 }
 
 impl QuestPanel {
-
     /// Render the quest panel.
     pub fn render(
         &mut self,

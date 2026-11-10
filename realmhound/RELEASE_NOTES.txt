@@ -1,3 +1,14 @@
+# RotMG In-Game Overlay (v0.0.3)
+* Added real-time in-game overlay with live RotMG window tracking.
+* Added live boss DPS HUD, mission tracklist, and quest monitor directly on top of the game client.
+* Added customizable overlay settings modal accessible from the top navigation bar.
+
+# Upstream Sync
+* Merged latest upstream improvements from pillarzz/RealmHound.
+* Decoupled UI rendering correctness from frame cadence for smoother performance.
+* Deferred window maximization until after initial presentation to prevent startup rendering glitches.
+* Enhanced Linux Steam and Proton compatibility with native Wayland clipboard support and font fallbacks.
+
 # PPE Discord Bot Integration (v0.0.2)
 * Added RotMG PPE Discord Bot HTTP bridge integration (`source: "tomato"` payload compatibility).
 * Added pull-up `🤖 PPE Bot` modal in the top bar with Bridge Review, Bridge Log, and Bot Configuration views.

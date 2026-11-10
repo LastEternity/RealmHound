@@ -702,8 +702,8 @@ fn update_overlay_drag(
     rt: &mut OverlayRuntimeState,
 ) -> bool {
     if let Some(mut drag) = rt.drag {
-        let still_down = primary_mouse_button_down()
-            .unwrap_or_else(|| vctx.input(|i| i.pointer.primary_down()));
+        let still_down =
+            primary_mouse_button_down().unwrap_or_else(|| vctx.input(|i| i.pointer.primary_down()));
         match (still_down, query_screen_cursor_pos()) {
             (true, Some(cursor)) => {
                 let delta_px = cursor - drag.start_cursor;
@@ -782,7 +782,12 @@ pub fn render_overlay_viewport(
     let root_ppp = root_ctx.pixels_per_point().max(0.25);
     let target_bounds = win_state
         .game_window_rect
-        .map(|r| Rect::from_min_max((r.min.to_vec2() / root_ppp).to_pos2(), (r.max.to_vec2() / root_ppp).to_pos2()))
+        .map(|r| {
+            Rect::from_min_max(
+                (r.min.to_vec2() / root_ppp).to_pos2(),
+                (r.max.to_vec2() / root_ppp).to_pos2(),
+            )
+        })
         .unwrap_or(fallback_bounds);
 
     let desired_size = egui::vec2(
@@ -1230,10 +1235,7 @@ fn render_overlay_header(
         } else if bg_resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
         }
-        if bg_resp.is_pointer_button_down_on()
-            || bg_resp.drag_started()
-            || bg_resp.dragged()
-        {
+        if bg_resp.is_pointer_button_down_on() || bg_resp.drag_started() || bg_resp.dragged() {
             begin_overlay_drag(ui.ctx(), cfg, rt);
         }
         if bg_resp.double_clicked() {
@@ -1299,15 +1301,8 @@ fn render_overlay_header(
         } else {
             Color32::from_rgba_unmultiplied(55, 70, 92, 165)
         };
-        let gear_resp = header_icon_button(
-            ui,
-            "hdr_gear",
-            "⚙",
-            gear_fill,
-            gear_rect,
-            scale,
-        )
-        .on_hover_text("Quick settings (opacity, icon size)");
+        let gear_resp = header_icon_button(ui, "hdr_gear", "⚙", gear_fill, gear_rect, scale)
+            .on_hover_text("Quick settings (opacity, icon size)");
         if gear_resp.clicked() {
             rt.quick_settings_open = !rt.quick_settings_open;
         }
@@ -1341,7 +1336,8 @@ fn render_overlay_header(
     } else {
         Color32::from_rgb(135, 145, 160)
     };
-    ui.painter().circle_filled(dot_center, dot_radius, dot_color);
+    ui.painter()
+        .circle_filled(dot_center, dot_radius, dot_color);
 
     let title_font = FontId::proportional((9.2 * scale).round().max(8.0));
     let title_galley = ui.painter().layout_no_wrap(
@@ -1351,7 +1347,11 @@ fn render_overlay_header(
     );
     let title_x = dot_center.x + dot_radius + (4.0 * scale).round();
     let title_pos = egui::pos2(title_x, cy - title_galley.size().y * 0.5);
-    ui.painter().galley(title_pos, title_galley.clone(), Color32::from_rgb(210, 220, 235));
+    ui.painter().galley(
+        title_pos,
+        title_galley.clone(),
+        Color32::from_rgb(210, 220, 235),
+    );
 
     // Area / Map badge (plus counts while minimized)
     let area_label = if !win_state.current_map_name.is_empty() {
@@ -1401,11 +1401,9 @@ fn render_overlay_header(
         let badge_y = (cy - badge_h * 0.5).round();
         let pad_x = (4.0 * scale).round().max(3.0);
         let badge_font = FontId::proportional((8.2 * scale).round().max(7.5));
-        let badge_galley = ui.painter().layout_no_wrap(
-            badge_text.clone(),
-            badge_font,
-            badge_c,
-        );
+        let badge_galley = ui
+            .painter()
+            .layout_no_wrap(badge_text.clone(), badge_font, badge_c);
         let text_w = badge_galley.size().x;
         let badge_w = (text_w + pad_x * 2.0).min(avail_badge_w);
 
@@ -1414,18 +1412,9 @@ fn render_overlay_header(
                 egui::pos2(badge_left, badge_y),
                 egui::vec2(badge_w, badge_h),
             );
-            let fill_c = Color32::from_rgba_unmultiplied(
-                badge_c.r(),
-                badge_c.g(),
-                badge_c.b(),
-                36,
-            );
-            let stroke_c = Color32::from_rgba_unmultiplied(
-                badge_c.r(),
-                badge_c.g(),
-                badge_c.b(),
-                110,
-            );
+            let fill_c = Color32::from_rgba_unmultiplied(badge_c.r(), badge_c.g(), badge_c.b(), 36);
+            let stroke_c =
+                Color32::from_rgba_unmultiplied(badge_c.r(), badge_c.g(), badge_c.b(), 110);
             let r = CornerRadius::same((3.0 * scale).round() as u8);
             ui.painter().rect_filled(badge_rect, r, fill_c);
             ui.painter().rect_stroke(
@@ -1443,11 +1432,11 @@ fn render_overlay_header(
                 ui.painter().galley(text_pos, badge_galley, badge_c);
             } else {
                 let clip = badge_rect.shrink2(egui::vec2(pad_x, 0.0));
-                let text_pos = egui::pos2(
-                    badge_rect.left() + pad_x,
-                    cy - badge_galley.size().y * 0.5,
-                );
-                ui.painter().with_clip_rect(clip).galley(text_pos, badge_galley, badge_c);
+                let text_pos =
+                    egui::pos2(badge_rect.left() + pad_x, cy - badge_galley.size().y * 0.5);
+                ui.painter()
+                    .with_clip_rect(clip)
+                    .galley(text_pos, badge_galley, badge_c);
             }
 
             let badge_resp = ui.interact(badge_rect, ui.id().with("hdr_badge"), Sense::hover());
@@ -1551,7 +1540,12 @@ fn render_quick_settings_bar(
 // ---------------------------------------------------------------------------
 
 /// Three equal-width segmented buttons: DPS / Tasks / Notes.
-fn render_tab_strip(ui: &mut egui::Ui, cfg: &mut OverlayConfig, cfg_changed: &mut bool, scale: f32) {
+fn render_tab_strip(
+    ui: &mut egui::Ui,
+    cfg: &mut OverlayConfig,
+    cfg_changed: &mut bool,
+    scale: f32,
+) {
     let gap = 2.0 * scale;
     let h = (15.0 * scale).max(13.0);
     let count = OverlayTab::ALL.len() as f32;
@@ -1656,7 +1650,11 @@ fn draw_participant_icon(
     size: f32,
 ) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), Sense::hover());
-    let icon = if p.skin_id > 0 { p.skin_id } else { p.object_type };
+    let icon = if p.skin_id > 0 {
+        p.skin_id
+    } else {
+        p.object_type
+    };
     if icon != 0
         && !sprite_renderer.draw_dyed_outlined_character_sprite(ui, icon, rect, 6, p.tex1, p.tex2)
         && p.object_type != 0
@@ -1665,7 +1663,13 @@ fn draw_participant_icon(
     }
 }
 
-fn small_label(ui: &mut egui::Ui, text: impl Into<String>, size: f32, color: Color32, strong: bool) {
+fn small_label(
+    ui: &mut egui::Ui,
+    text: impl Into<String>,
+    size: f32,
+    color: Color32,
+    strong: bool,
+) {
     let mut rt = RichText::new(text.into()).size(size).color(color);
     if strong {
         rt = rt.strong();
@@ -1718,7 +1722,12 @@ fn render_live_dps_body(
                 ("ENDED", Color32::from_rgb(150, 155, 165))
             };
             egui::Frame::NONE
-                .fill(Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 40))
+                .fill(Color32::from_rgba_unmultiplied(
+                    color.r(),
+                    color.g(),
+                    color.b(),
+                    40,
+                ))
                 .corner_radius(CornerRadius::same(3))
                 .inner_margin(Margin::symmetric(3, 0))
                 .show(ui, |ui| {
@@ -1740,7 +1749,11 @@ fn render_live_dps_body(
                 Sense::hover(),
             );
             let p = ui.painter();
-            p.rect_filled(rect, CornerRadius::same(1), Color32::from_rgba_unmultiplied(60, 25, 30, 170));
+            p.rect_filled(
+                rect,
+                CornerRadius::same(1),
+                Color32::from_rgba_unmultiplied(60, 25, 30, 170),
+            );
             let mut fill = rect;
             fill.set_width(rect.width() * frac);
             p.rect_filled(fill, CornerRadius::same(1), Color32::from_rgb(215, 70, 70));
@@ -1766,48 +1779,58 @@ fn render_live_dps_body(
 
     // --- You -----------------------------------------------------------------
     let you_accent = s.local_rank.map(rank_color).unwrap_or(dim);
-    card(ui, you_accent, &mut |ui| match (s.local_player.as_ref(), s.local_rank) {
-        (Some(me), Some(rank)) => {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0 * scale;
-                small_label(ui, format!("#{rank}"), 14.0 * scale, rank_color(rank), true);
+    card(
+        ui,
+        you_accent,
+        &mut |ui| match (s.local_player.as_ref(), s.local_rank) {
+            (Some(me), Some(rank)) => {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0 * scale;
+                    small_label(ui, format!("#{rank}"), 14.0 * scale, rank_color(rank), true);
+                    small_label(
+                        ui,
+                        format!("of {}", s.participant_count),
+                        9.0 * scale,
+                        dim,
+                        false,
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let dpm = s.dpm_for(me.damage).unwrap_or(0.0);
+                        small_label(ui, "DPM", 8.5 * scale, dim, true);
+                        small_label(ui, fmt_compact(dpm), 12.0 * scale, bright, true);
+                    });
+                });
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0 * scale;
+                    small_label(ui, "YOU", 8.5 * scale, dim, true);
+                    small_label(ui, fmt_thousands(me.damage), 10.0 * scale, bright, true);
+                    if let Some(pct) = s.share_pct_for(me.damage) {
+                        small_label(ui, format!("({pct:.1}%)"), 9.0 * scale, dim, false);
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if let Some(dps) = s.dps_for(me.damage) {
+                            small_label(
+                                ui,
+                                format!("{}/s", fmt_compact(dps)),
+                                9.0 * scale,
+                                dim,
+                                false,
+                            );
+                        }
+                    });
+                });
+            }
+            _ => {
                 small_label(
                     ui,
-                    format!("of {}", s.participant_count),
-                    9.0 * scale,
+                    "You haven't damaged this boss yet.",
+                    9.5 * scale,
                     dim,
                     false,
                 );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let dpm = s.dpm_for(me.damage).unwrap_or(0.0);
-                    small_label(ui, "DPM", 8.5 * scale, dim, true);
-                    small_label(ui, fmt_compact(dpm), 12.0 * scale, bright, true);
-                });
-            });
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0 * scale;
-                small_label(ui, "YOU", 8.5 * scale, dim, true);
-                small_label(ui, fmt_thousands(me.damage), 10.0 * scale, bright, true);
-                if let Some(pct) = s.share_pct_for(me.damage) {
-                    small_label(ui, format!("({pct:.1}%)"), 9.0 * scale, dim, false);
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if let Some(dps) = s.dps_for(me.damage) {
-                        small_label(ui, format!("{}/s", fmt_compact(dps)), 9.0 * scale, dim, false);
-                    }
-                });
-            });
-        }
-        _ => {
-            small_label(
-                ui,
-                "You haven't damaged this boss yet.",
-                9.5 * scale,
-                dim,
-                false,
-            );
-        }
-    });
+            }
+        },
+    );
 
     // --- Top damage / comparison ---------------------------------------------
     let you_are_top = s.top_player.as_ref().is_some_and(|t| t.is_local);
@@ -1819,7 +1842,13 @@ fn render_live_dps_body(
     let Some(other) = compare else {
         if you_are_top {
             ui.add_space(2.0 * scale);
-            small_label(ui, "Solo — no one to compare against.", 9.0 * scale, dim, false);
+            small_label(
+                ui,
+                "Solo — no one to compare against.",
+                9.0 * scale,
+                dim,
+                false,
+            );
         }
         return;
     };
@@ -1829,7 +1858,13 @@ fn render_live_dps_body(
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0 * scale;
             draw_participant_icon(ui, sprite_renderer, other, 16.0 * scale);
-            small_label(ui, format!("#{rank_shown}"), 10.0 * scale, rank_color(rank_shown), true);
+            small_label(
+                ui,
+                format!("#{rank_shown}"),
+                10.0 * scale,
+                rank_color(rank_shown),
+                true,
+            );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let dpm = s.dpm_for(other.damage).unwrap_or(0.0);
                 small_label(ui, "DPM", 8.5 * scale, dim, true);
@@ -2171,8 +2206,10 @@ fn render_single_mission_card(
                         .rect_filled(bar_rect, CornerRadius::same(2), track_bg);
                     if frac > 0.0 {
                         let fill_w = (bar_rect.width() * frac).max(3.0);
-                        let fill_rect =
-                            Rect::from_min_size(bar_rect.min, egui::vec2(fill_w, bar_rect.height()));
+                        let fill_rect = Rect::from_min_size(
+                            bar_rect.min,
+                            egui::vec2(fill_w, bar_rect.height()),
+                        );
                         ui.painter()
                             .rect_filled(fill_rect, CornerRadius::same(2), fill_c);
                     }
@@ -2426,24 +2463,16 @@ fn render_quest_mark_chip(
                         Color32::from_rgb(235, 200, 85)
                     };
                     ui.label(
-                        RichText::new(format!(
-                            "S:{}/{}",
-                            m.seasonal_have.min(m.need),
-                            m.need
-                        ))
-                        .size(8.8 * scale)
-                        .strong()
-                        .color(s_col),
+                        RichText::new(format!("S:{}/{}", m.seasonal_have.min(m.need), m.need))
+                            .size(8.8 * scale)
+                            .strong()
+                            .color(s_col),
                     );
                     ui.label(
-                        RichText::new(format!(
-                            "R:{}/{}",
-                            m.regular_have.min(m.need),
-                            m.need
-                        ))
-                        .size(8.8 * scale)
-                        .strong()
-                        .color(r_col),
+                        RichText::new(format!("R:{}/{}", m.regular_have.min(m.need), m.need))
+                            .size(8.8 * scale)
+                            .strong()
+                            .color(r_col),
                     );
                 } else {
                     let txt_col = if met {

@@ -354,11 +354,7 @@ mod bg_probe {
                 *cached_proc_running = true;
                 true
             } else {
-                check_proc_running_throttled(
-                    session_connected,
-                    last_proc_scan,
-                    cached_proc_running,
-                )
+                check_proc_running_throttled(session_connected, last_proc_scan, cached_proc_running)
             };
             let rotmg_focused = if win_probe.window_found {
                 win_probe.is_foreground || win_probe.overlay_is_foreground
@@ -500,9 +496,7 @@ pub fn compute_overlay_position(
         OverlayAnchor::BottomLeft => egui::pos2(bounds.left() + ox, bounds.bottom() - h - oy),
         OverlayAnchor::TopRight => egui::pos2(bounds.right() - w - ox, bounds.top() + oy),
         OverlayAnchor::BottomRight => egui::pos2(bounds.right() - w - ox, bounds.bottom() - h - oy),
-        OverlayAnchor::TopCenter => {
-            egui::pos2(bounds.center().x - w * 0.5 + ox, bounds.top() + oy)
-        }
+        OverlayAnchor::TopCenter => egui::pos2(bounds.center().x - w * 0.5 + ox, bounds.top() + oy),
         OverlayAnchor::Custom => egui::pos2(cfg.custom_x, cfg.custom_y),
     };
 
@@ -623,7 +617,9 @@ mod win32_probe {
     use eframe::egui;
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, FindWindowW, GetClientRect, GetCursorPos, GetForegroundWindow,
         GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, GetWindowTextW, IsIconic, IsWindow,
@@ -651,10 +647,8 @@ mod win32_probe {
             return;
         }
         let cur = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as usize;
-        let mut target = cur
-            | (WS_EX_TOOLWINDOW as usize)
-            | (WS_EX_TOPMOST as usize)
-            | (WS_EX_LAYERED as usize);
+        let mut target =
+            cur | (WS_EX_TOOLWINDOW as usize) | (WS_EX_TOPMOST as usize) | (WS_EX_LAYERED as usize);
         // The Notes tab needs keyboard focus for typing; every other tab keeps
         // the overlay non-activating so RotMG never loses focus.
         if OVERLAY_ALLOW_ACTIVATE.load(Ordering::Relaxed) {
@@ -1234,8 +1228,7 @@ mod tests {
             offset_y: 30.0,
             ..OverlayConfig::default()
         };
-        let bounds =
-            egui::Rect::from_min_max(egui::pos2(100.0, 50.0), egui::pos2(2020.0, 1130.0));
+        let bounds = egui::Rect::from_min_max(egui::pos2(100.0, 50.0), egui::pos2(2020.0, 1130.0));
         let size = egui::vec2(300.0, 200.0);
 
         let pos = compute_overlay_position(&cfg, bounds, size);

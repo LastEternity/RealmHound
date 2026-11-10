@@ -690,4 +690,3 @@ mod live_dps_tests {
         assert_eq!(snap.dpm_for(45_000), Some(60_000.0));
     }
 }
-

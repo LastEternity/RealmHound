@@ -10,9 +10,7 @@ use super::config::{
     MissionFilterSource, OverlayAnchor, OverlayConfig, OverlayDisplayMode, OverlayQuestSide,
     OverlayTab, PillOrientation, QuestFilterSource, VisibilityTrigger,
 };
-use super::renderer::{
-    render_overlay_panel_contents, OverlayProjectedData, OverlayRuntimeState,
-};
+use super::renderer::{render_overlay_panel_contents, OverlayProjectedData, OverlayRuntimeState};
 use super::window_tracker::GameWindowState;
 use crate::rendering::sprite_renderer::SpriteRenderer;
 use crate::shadcn_ui::Shadcn;
@@ -398,7 +396,10 @@ fn render_general_section(
 
     for trig in VisibilityTrigger::ALL {
         let selected = cfg.trigger == trig;
-        if ui.radio(selected, RichText::new(trig.label()).strong()).clicked() {
+        if ui
+            .radio(selected, RichText::new(trig.label()).strong())
+            .clicked()
+        {
             cfg.trigger = trig;
         }
         ui.indent(trig.label(), |ui| {
@@ -644,11 +645,7 @@ fn render_appearance_section(
     }
 }
 
-fn render_missions_quests_section(
-    ui: &mut egui::Ui,
-    shadcn: &Shadcn,
-    cfg: &mut OverlayConfig,
-) {
+fn render_missions_quests_section(ui: &mut egui::Ui, shadcn: &Shadcn, cfg: &mut OverlayConfig) {
     ui.heading("Missions & Daily Quests Content");
     ui.label(
         RichText::new(
@@ -775,7 +772,10 @@ fn render_missions_quests_section(
                     &mut cfg.only_quests_with_progress,
                     "Only show quests where I own at least 1 required mark",
                 );
-                ui.checkbox(&mut cfg.show_quest_names, "Show quest titles above mark icons");
+                ui.checkbox(
+                    &mut cfg.show_quest_names,
+                    "Show quest titles above mark icons",
+                );
                 ui.checkbox(
                     &mut cfg.show_quest_rewards,
                     "Show quest chest / reward icon on each row",

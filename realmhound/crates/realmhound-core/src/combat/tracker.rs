@@ -1714,18 +1714,21 @@ impl CombatTracker {
     pub fn live_dps_snapshot(&self) -> Option<LiveBossDpsSnapshot> {
         let assets = get_asset_manager();
 
-        let fight_has_activity = |f: &&FightState| {
-            f.attackers
-                .values()
-                .any(|a| a.damage > 0 || a.hits > 0)
-        };
+        let fight_has_activity =
+            |f: &&FightState| f.attackers.values().any(|a| a.damage > 0 || a.hits > 0);
 
         let fight_priority = |f: &&FightState| {
             let not_crate = !assets.is_treasure_crate(f.boss_object_type);
             let local_engaged = f.attackers.iter().any(|(&aid, a)| {
                 (a.is_local || aid == self.local_object_id) && (a.damage > 0 || a.hits > 0)
             });
-            (not_crate, local_engaged, f.last_activity, f.boss_max_hp, f.boss_object_id)
+            (
+                not_crate,
+                local_engaged,
+                f.last_activity,
+                f.boss_max_hp,
+                f.boss_object_id,
+            )
         };
 
         if let Some(active) = self

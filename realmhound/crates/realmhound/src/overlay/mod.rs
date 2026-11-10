@@ -229,8 +229,10 @@ pub fn update_and_render(
     };
     let mgr = &mut *mgr_guard;
 
-    let any_active =
-        mgr.config.enabled || mgr.modal.open || mgr.runtime.preview_override || mgr.runtime.unlocked_override;
+    let any_active = mgr.config.enabled
+        || mgr.modal.open
+        || mgr.runtime.preview_override
+        || mgr.runtime.unlocked_override;
     if !any_active {
         if mgr.currently_shown {
             window_tracker::notify_overlay_hidden();
